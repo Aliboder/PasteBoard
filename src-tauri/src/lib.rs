@@ -1,3 +1,10 @@
+mod db;
+mod dedup;
+mod models;
+mod state;
+mod store;
+
+use state::AppState;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -61,6 +68,14 @@ pub fn run() {
         .setup(|app| {
             setup_tray(app.handle())?;
             setup_hotkey(app.handle());
+
+            // 初始化数据目录与共享状态
+            let data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
+            let state = AppState::new(data_dir.clone(), data_dir.join("pasteboard.db"))
+                .expect("failed to init app state");
+            log::info!("data dir: {}", data_dir.display());
+            app.manage(state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![])
