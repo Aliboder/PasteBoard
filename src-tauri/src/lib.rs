@@ -1,4 +1,5 @@
 mod clipboard;
+mod commands;
 mod db;
 mod dedup;
 mod models;
@@ -102,7 +103,15 @@ pub fn run() {
             monitor::start(app.handle().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![])
+        .invoke_handler(tauri::generate_handler![
+            commands::get_history,
+            commands::pin_item,
+            commands::delete_item,
+            commands::clear_history,
+            commands::get_settings,
+            commands::set_max_items,
+            commands::get_thumb,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
