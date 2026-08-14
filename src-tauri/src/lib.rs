@@ -1,6 +1,8 @@
+mod clipboard;
 mod db;
 mod dedup;
 mod models;
+mod monitor;
 mod state;
 mod store;
 
@@ -11,6 +13,24 @@ use tauri::{
     AppHandle, Manager,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+/// 极简日志器：输出到 stderr（tauri dev 会捕获）
+struct SimpleLogger;
+
+impl log::Log for SimpleLogger {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record) {
+        eprintln!("[PasteBoard][{}] {}", record.level(), record.args());
+    }
+    fn flush(&self) {}
+}
+
+fn init_logger() {
+    let _ = log::set_logger(&SimpleLogger);
+    log::set_max_level(log::LevelFilter::Info);
+}
 
 /// 切换主窗口显示/隐藏
 fn toggle_main_window(app: &AppHandle) {
@@ -56,6 +76,7 @@ fn setup_hotkey(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    init_logger();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // 已有实例运行时，唤起主窗口
@@ -76,6 +97,9 @@ pub fn run() {
                 .expect("failed to init app state");
             log::info!("data dir: {}", data_dir.display());
             app.manage(state);
+
+            // 启动剪贴板监听（事件驱动 + 轮询兜底）
+            monitor::start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![])

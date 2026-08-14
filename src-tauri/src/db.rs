@@ -2,7 +2,6 @@
 
 use crate::models::{Item, ItemKind};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::path::Path;
 
 pub const DEFAULT_MAX_ITEMS: i64 = 500;
 
@@ -163,6 +162,20 @@ impl Db {
             params![pinned as i64, id],
         )?;
         Ok(n > 0)
+    }
+
+    /// 图片落盘后回填路径
+    pub fn set_image_paths(
+        &self,
+        id: i64,
+        image_path: Option<String>,
+        thumb_path: Option<String>,
+    ) -> Result<(), DbError> {
+        self.conn.execute(
+            "UPDATE items SET image_path = ?1, thumb_path = ?2 WHERE id = ?3",
+            params![image_path, thumb_path, id],
+        )?;
+        Ok(())
     }
 
     /// 删除单条；返回被删条目的磁盘文件路径（若有），供调用方清理文件
