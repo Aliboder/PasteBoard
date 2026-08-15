@@ -70,6 +70,39 @@ AI 自检（编译/类型检查/测试）+ 请用户验收
 4. **完成标准**：自己先验证（命令输出/日志/截图证据），用户亲自验收通过才算完成。
 5. **git 操作主动代做**：用户不会用 git，涉及提交/推送/发布要主动协助。常规节奏：每批改动用户验收后，提交并推送；版本发布时同步打 tag + GitHub Release。
 
+### 2.5 GitHub 推送与版本发布（详细流程）
+
+**仓库信息**
+- 地址：`github.com/Aliboder/PasteBoard`（**私有**），默认分支 `main`
+- 工具：`gh` CLI 已登录（账号 `Aliboder`，token 存于系统凭据 keyring）
+
+**常规推送流程（每批功能/修复后）**
+1. 用户验收通过后，主动提交并推送（无需另行吩咐）
+2. 提交前先 `git status` / `git diff` 检查，只暂存预期文件
+3. 构建产物不提交（已在 .gitignore：`.svelte-kit/`、`build/`、`target/`、`node_modules/`、`src-tauri/gen/`）
+4. 提交信息格式：`type: 中文描述`，type 用 `feat` / `fix` / `docs` / `chore` / `refactor`（如 `feat: 设置面板美化`）
+5. `git push` 推送 `main`
+
+**版本发布流程（功能批次完成后）**
+1. **三处同步升版本号**：`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`README.md` 版本行
+2. 全量自检：`cargo check`、`cargo test`、`npm run check`、`npm run build`
+3. 打包：`npm run tauri build` → 产物在 `src-tauri/target/release/bundle/`（nsis/ 与 msi/ 子目录 + 便携 exe）
+4. **清理旧版本安装包**（只保留当前版本产物）
+5. 提交并推送代码
+6. 创建 Release：
+   ```bash
+   gh release create vX.Y.Z \
+     --title "PasteBoard vX.Y.Z" \
+     --notes-file release-notes.md \
+     <nsis-setup.exe> <msi> <便携 exe>
+   ```
+   - 说明文档分板块（中文）：`📦 安装包说明` / `✨ 更新内容` / `🔧 修复内容` / `🗺️ 后续规划`
+   - 更新内容与修复内容要**分列清晰**，逐条描述实际变更
+
+**注意事项**
+- Release 说明必须分区撰写，功能与修复分开，避免混在一起
+- 用户不会用 git——以上全部由 AI 代做，只向用户汇报结果与链接（如 `https://github.com/Aliboder/PasteBoard/releases/tag/vX.Y.Z`）
+
 ### 常用命令
 
 ```bash
