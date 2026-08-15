@@ -6,6 +6,7 @@
     deleteItem,
     clearHistory,
     pasteItem,
+    getImage,
     getSettings,
     setMaxItems,
     onChange,
@@ -23,6 +24,21 @@
   let settings = $state<SettingsDto | null>(null);
   let maxItemsInput = $state("500");
   let settingsMsg = $state("");
+  let hoverPreview = $state<{ src: string; top: number } | null>(null);
+  const previewCache = new Map<number, string>();
+  let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** 时间显示：今天 → HH:mm，昨天 → 昨天 HH:mm，更早 → MM-DD HH:mm */
+  function timeLabel(ms: number): string {
+    const d = new Date(ms);
+    const now = new Date();
+    const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    if (d.toDateString() === now.toDateString()) return hhmm;
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (d.toDateString() === yesterday.toDateString()) return `昨天 ${hhmm}`;
+    return `${d.getMonth() + 1}-${d.getDate()} ${hhmm}`;
+  }
 
   async function openSettings() {
     showSettings = true;
@@ -89,7 +105,32 @@
     }
   }
 
-  function onKeydown(e: KeyboardEvent) {
+  /** 图片悬停大图预览（350ms 延迟，原图懒加载并缓存） */
+  async function showPreview(item: ItemDto, rowEl: HTMLElement) {
+    if (item.kind !== "image") return;
+    if (hoverTimer) clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(async () => {
+      let src = previewCache.get(item.id);
+      if (!src) {
+        src = (await getImage(item.id)) ?? "";
+        if (src) previewCache.set(item.id, src);
+      }
+      if (!src) return;
+      const maxH = 300;
+      let top = rowEl.offsetTop - maxH - 8;
+      if (top < 8) top = rowEl.offsetTop + rowEl.offsetHeight + 8;
+      hoverPreview = { src, top };
+    }, 350);
+  }
+
+  function hidePreview() {
+    if (hoverTimer) clearTimeout(hoverTimer);
+    hoverPreview = null;
+  }
+
+  /** 全局键盘：↑↓ 选择、Enter 粘贴、Esc 关闭、数字 1~9 快捷粘贴、Delete 删除 */
+  function globalKeydown(e: KeyboardEvent) {
+    const inInput = document.activeElement?.tagName === "INPUT";
     if (e.key === "ArrowDown") {
       e.preventDefault();
       if (items.length) selected = (selected + 1) % items.length;
@@ -101,6 +142,11 @@
       if (selected >= 0 && items[selected]) paste(items[selected].id);
     } else if (e.key === "Escape") {
       getCurrentWindow().hide();
+    } else if (e.key === "Delete" && !inInput) {
+      if (selected >= 0 && items[selected]) remove(items[selected]);
+    } else if (/^[1-9]$/.test(e.key) && !inInput) {
+      const idx = parseInt(e.key, 10) - 1;
+      if (items[idx]) paste(items[idx].id);
     }
   }
 
@@ -116,6 +162,8 @@
 <svelte:head>
   <title>PasteBoard</title>
 </svelte:head>
+
+<svelte:window onkeydown={globalKeydown} />
 
 <div class="window">
   <!-- 顶栏：拖动区域 + 搜索 + 清空 -->
@@ -164,7 +212,7 @@
   {/if}
 
   <!-- 列表 -->
-  <main class="list" onkeydown={onKeydown} tabindex="-1" role="listbox" aria-label="剪贴板历史">
+  <main class="list">
     {#if error}
       <p class="empty error-msg">{error}</p>
     {:else if loading}
@@ -181,7 +229,11 @@
           role="option"
           aria-selected={i === selected}
           tabindex="-1"
-          onmouseenter={() => (selected = i)}
+          onmouseenter={(e) => {
+            selected = i;
+            showPreview(item, e.currentTarget as HTMLElement);
+          }}
+          onmouseleave={hidePreview}
           onclick={() => paste(item.id)}
           onkeydown={(e) => {
             if (e.key === "Enter") paste(item.id);
@@ -197,7 +249,7 @@
             </div>
             <div class="meta">
               <span class="title">图片</span>
-              <span class="time">{relativeTime(item.created_at)}</span>
+              <span class="time">{timeLabel(item.created_at)}</span>
             </div>
           {:else}
             <div class="meta">
@@ -205,7 +257,7 @@
                 {item.kind === "files" ? fileLabel(item) : item.preview}
               </span>
               <span class="time">
-                {relativeTime(item.created_at)}
+                {timeLabel(item.created_at)}
                 {#if item.kind === "files" && item.file_count > 1}
                   · {item.file_count} 个文件
                 {/if}
@@ -223,6 +275,12 @@
           </div>
         </div>
       {/each}
+
+      {#if hoverPreview}
+        <div class="img-preview" style="top: {hoverPreview.top}px">
+          <img src="data:image/png;base64,{hoverPreview.src}" alt="预览" />
+        </div>
+      {/if}
     {/if}
   </main>
 
@@ -393,6 +451,7 @@
     overflow-y: auto;
     padding: 4px 10px 8px;
     outline: none;
+    position: relative;
   }
   .list::-webkit-scrollbar {
     width: 6px;
@@ -468,6 +527,27 @@
   .row:hover .actions,
   .row.selected .actions {
     opacity: 1;
+  }
+
+  /* 图片大图预览浮层 */
+  .img-preview {
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    max-height: 300px;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+    z-index: 10;
+    pointer-events: none;
+    display: flex;
+  }
+  .img-preview img {
+    width: 100%;
+    max-height: 300px;
+    object-fit: contain;
   }
 
   .empty {

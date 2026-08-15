@@ -12,9 +12,14 @@ use state::AppState;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Manager,
+    AppHandle, Manager, PhysicalPosition, Position,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use windows::Win32::Foundation::POINT;
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 /// 极简日志器：输出到 stderr（tauri dev 会捕获）+ 日志文件（%APPDATA%/com.aliboder.pasteboard/pasteboard.log）
 struct SimpleLogger {
@@ -77,6 +82,29 @@ fn init_logger() {
     }
 }
 
+/// 计算弹出窗位置：跟随鼠标，横向居中于光标，纵向在光标下方；
+/// 自动钳制在光标所在显示器的工作区内
+fn popup_position(win_w: i32, win_h: i32) -> (i32, i32) {
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return (0, 0); // 取不到光标则用系统默认位置
+        }
+        let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return (0, 0);
+        }
+        let work = info.rcWork;
+        let x = (pt.x - win_w / 2).clamp(work.left + 8, work.right - win_w - 8);
+        let y = (pt.y + 16).clamp(work.top + 8, work.bottom - win_h - 8);
+        (x, y)
+    }
+}
+
 /// 切换主窗口显示/隐藏
 fn toggle_main_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
@@ -99,6 +127,9 @@ fn toggle_main_window(app: &AppHandle) {
                     .prev_sel_end
                     .store(ctx.sel_end, std::sync::atomic::Ordering::SeqCst);
             }
+            // 跟随鼠标定位
+            let (x, y) = popup_position(420, 620);
+            let _ = win.set_position(Position::Physical(PhysicalPosition::new(x, y)));
             let _ = win.show();
             let _ = win.set_focus();
         }
@@ -171,6 +202,7 @@ pub fn run() {
             commands::get_settings,
             commands::set_max_items,
             commands::get_thumb,
+            commands::get_image,
             commands::paste_item,
         ])
         .run(tauri::generate_context!())

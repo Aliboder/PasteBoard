@@ -113,6 +113,19 @@ pub fn get_thumb(state: State<'_, AppState>, id: i64) -> CmdResult<Option<String
     Ok(std::fs::read(&path).ok().map(|b| crate::monitor::base64_encode(&b)))
 }
 
+/// 图片原图 base64（大图预览用，按 id 读取）
+#[tauri::command]
+pub fn get_image(state: State<'_, AppState>, id: i64) -> CmdResult<Option<String>> {
+    let db = state.db.lock().unwrap();
+    let Some(item) = db.get_item(id)? else {
+        return Ok(None);
+    };
+    let Some(path) = item.image_path else {
+        return Ok(None);
+    };
+    Ok(std::fs::read(&path).ok().map(|b| crate::monitor::base64_encode(&b)))
+}
+
 /// 组装前端视图（缩略图 base64 内联，MVP 简单方案）
 fn to_dto(_state: &AppState, item: &Item) -> ItemDto {
     let thumb = if item.kind == crate::models::ItemKind::Image {

@@ -41,6 +41,10 @@ export async function pasteItem(id: number): Promise<void> {
   return invoke("paste_item", { id });
 }
 
+export async function getImage(id: number): Promise<string | null> {
+  return invoke("get_image", { id });
+}
+
 export async function getSettings(): Promise<SettingsDto> {
   return invoke("get_settings");
 }
