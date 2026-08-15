@@ -4,6 +4,7 @@ mod db;
 mod dedup;
 mod models;
 mod monitor;
+mod paste;
 mod state;
 mod store;
 
@@ -39,6 +40,22 @@ fn toggle_main_window(app: &AppHandle) {
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
         } else {
+            // 唤起前记录前台窗口、焦点控件与选中范围，供粘贴回原窗口使用
+            if let Some(state) = app.try_state::<AppState>() {
+                let ctx = crate::paste::record_foreground();
+                state
+                    .prev_foreground
+                    .store(ctx.hwnd, std::sync::atomic::Ordering::SeqCst);
+                state
+                    .prev_focus
+                    .store(ctx.focus, std::sync::atomic::Ordering::SeqCst);
+                state
+                    .prev_sel_start
+                    .store(ctx.sel_start, std::sync::atomic::Ordering::SeqCst);
+                state
+                    .prev_sel_end
+                    .store(ctx.sel_end, std::sync::atomic::Ordering::SeqCst);
+            }
             let _ = win.show();
             let _ = win.set_focus();
         }
@@ -111,6 +128,7 @@ pub fn run() {
             commands::get_settings,
             commands::set_max_items,
             commands::get_thumb,
+            commands::paste_item,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -37,6 +37,10 @@ export async function clearHistory(): Promise<number> {
   return invoke("clear_history");
 }
 
+export async function pasteItem(id: number): Promise<void> {
+  return invoke("paste_item", { id });
+}
+
 export async function getSettings(): Promise<SettingsDto> {
   return invoke("get_settings");
 }

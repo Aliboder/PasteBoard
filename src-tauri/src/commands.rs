@@ -72,6 +72,12 @@ pub fn clear_history(state: State<'_, AppState>) -> CmdResult<u32> {
     Ok(n)
 }
 
+/// 粘贴条目到上一窗口（核心动作）
+#[tauri::command]
+pub fn paste_item(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    crate::paste::paste_item(&state, id).map_err(|m| CommandError { message: m })
+}
+
 #[derive(Debug, Serialize)]
 pub struct SettingsDto {
     pub max_items: i64,

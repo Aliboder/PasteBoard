@@ -257,10 +257,134 @@ pub fn write_text(text: &str) -> bool {
     true
 }
 
+/// 写入 RGBA 像素为 CF_DIB（32bpp BGRA，BI_RGB，自下而上）到剪贴板
+pub fn write_image_rgba(rgba: &[u8], width: u32, height: u32) -> bool {
+    let _guard = match CLIP_MUTEX.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    if !open_clipboard() {
+        return false;
+    }
+    let ok = unsafe {
+        let _ = EmptyClipboard();
+        let header_size = 40usize;
+        let row_stride = width as usize * 4;
+        let data_size = row_stride * height as usize;
+        let total = header_size + data_size;
+        let h = match GlobalAlloc(GMEM_MOVEABLE, total) {
+            Ok(h) => h,
+            Err(_) => {
+                close_clipboard();
+                return false;
+            }
+        };
+        let ptr = GlobalLock(h);
+        if ptr.is_null() {
+            let _ = GlobalFree(Some(h));
+            close_clipboard();
+            return false;
+        }
+        let p = ptr as *mut u8;
+        // BITMAPINFOHEADER
+        let bi_size = header_size as u32;
+        let bi_width = width as i32;
+        let bi_height = height as i32;
+        let bi_planes: u16 = 1;
+        let bi_bit_count: u16 = 32;
+        let bi_compression: u32 = 0; // BI_RGB
+        let bi_size_image = data_size as u32;
+        std::ptr::copy_nonoverlapping(&bi_size as *const u32 as *const u8, p, 4);
+        std::ptr::copy_nonoverlapping(&bi_width as *const i32 as *const u8, p.add(4), 4);
+        std::ptr::copy_nonoverlapping(&bi_height as *const i32 as *const u8, p.add(8), 4);
+        std::ptr::copy_nonoverlapping(&bi_planes as *const u16 as *const u8, p.add(12), 2);
+        std::ptr::copy_nonoverlapping(&bi_bit_count as *const u16 as *const u8, p.add(14), 2);
+        std::ptr::copy_nonoverlapping(&bi_compression as *const u32 as *const u8, p.add(16), 4);
+        std::ptr::copy_nonoverlapping(&bi_size_image as *const u32 as *const u8, p.add(20), 4);
+        // 像素：RGBA → BGRA，自下而上
+        let pixels = p.add(header_size);
+        for y in 0..height as usize {
+            let src_row = &rgba[y * row_stride..(y + 1) * row_stride];
+            let dst_row = pixels.add((height as usize - 1 - y) * row_stride);
+            for x in 0..width as usize {
+                let s = x * 4;
+                let d = dst_row.add(x * 4);
+                *d = src_row[s + 2]; // B
+                *d.add(1) = src_row[s + 1]; // G
+                *d.add(2) = src_row[s]; // R
+                *d.add(3) = 255; // A
+            }
+        }
+        let _ = GlobalUnlock(h);
+        let ok = SetClipboardData(CF_DIB.0 as u32, Some(HANDLE(h.0))).is_ok();
+        if !ok {
+            let _ = GlobalFree(Some(h));
+        }
+        ok
+    };
+    close_clipboard();
+    ok
+}
+
+/// 写入文件路径列表为 CF_HDROP 到剪贴板
+pub fn write_files(paths: &[String]) -> bool {
+    let _guard = match CLIP_MUTEX.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    if !open_clipboard() {
+        return false;
+    }
+    let ok = unsafe {
+        let _ = EmptyClipboard();
+        // DROPFILES: pFiles(u32) + pt(2×i32) + fNC(u32) + fWide(u32) = 20 字节
+        let mut wide: Vec<u16> = Vec::new();
+        for p in paths {
+            wide.extend(p.encode_utf16());
+            wide.push(0);
+        }
+        wide.push(0); // 列表以双 NUL 结尾
+        let payload = wide.len() * 2;
+        let total = 20 + payload;
+        let h = match GlobalAlloc(GMEM_MOVEABLE, total) {
+            Ok(h) => h,
+            Err(_) => {
+                close_clipboard();
+                return false;
+            }
+        };
+        let ptr = GlobalLock(h);
+        if ptr.is_null() {
+            let _ = GlobalFree(Some(h));
+            close_clipboard();
+            return false;
+        }
+        let p = ptr as *mut u8;
+        let pfiles: u32 = 20;
+        let pt_x: i32 = 0;
+        let pt_y: i32 = 0;
+        let f_nc: u32 = 0;
+        let f_wide: u32 = 1;
+        std::ptr::copy_nonoverlapping(&pfiles as *const u32 as *const u8, p, 4);
+        std::ptr::copy_nonoverlapping(&pt_x as *const i32 as *const u8, p.add(4), 4);
+        std::ptr::copy_nonoverlapping(&pt_y as *const i32 as *const u8, p.add(8), 4);
+        std::ptr::copy_nonoverlapping(&f_nc as *const u32 as *const u8, p.add(12), 4);
+        std::ptr::copy_nonoverlapping(&f_wide as *const u32 as *const u8, p.add(16), 4);
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), p.add(20) as *mut u16, wide.len());
+        let _ = GlobalUnlock(h);
+        let ok = SetClipboardData(CF_HDROP.0 as u32, Some(HANDLE(h.0))).is_ok();
+        if !ok {
+            let _ = GlobalFree(Some(h));
+        }
+        ok
+    };
+    close_clipboard();
+    ok
+}
+
 /// 当前剪贴板格式列表（调试用）
 #[allow(dead_code)]
-pub fn format_names() -> Vec<String> {
-    let mut out = Vec::new();
+pub fn format_names() -> Vec<String> {    let mut out = Vec::new();
     let _guard = CLIP_MUTEX.lock();
     if !open_clipboard() {
         return out;

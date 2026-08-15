@@ -5,6 +5,7 @@
     pinItem,
     deleteItem,
     clearHistory,
+    pasteItem,
     onChange,
     type ItemDto,
   } from "../lib/api";
@@ -14,6 +15,7 @@
   let filter = $state("");
   let selected = $state(-1);
   let loading = $state(true);
+  let error = $state("");
 
   async function reload() {
     loading = true;
@@ -53,6 +55,16 @@
     await reload();
   }
 
+  async function paste(id: number) {
+    error = "";
+    try {
+      await pasteItem(id);
+      await getCurrentWindow().hide();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -60,10 +72,12 @@
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       if (items.length) selected = selected <= 0 ? items.length - 1 : selected - 1;
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (selected >= 0 && items[selected]) paste(items[selected].id);
     } else if (e.key === "Escape") {
       getCurrentWindow().hide();
     }
-    // Enter → 粘贴（阶段 5 接入）
   }
 
   onMount(() => {
@@ -98,8 +112,10 @@
   </header>
 
   <!-- 列表 -->
-  <main class="list" onkeydown={onKeydown} tabindex="-1">
-    {#if loading}
+  <main class="list" onkeydown={onKeydown} tabindex="-1" role="listbox" aria-label="剪贴板历史">
+    {#if error}
+      <p class="empty error-msg">{error}</p>
+    {:else if loading}
       <p class="empty">加载中…</p>
     {:else if items.length === 0}
       <p class="empty">
@@ -110,7 +126,14 @@
         <div
           class="row {item.kind}"
           class:selected={i === selected}
+          role="option"
+          aria-selected={i === selected}
+          tabindex="-1"
           onmouseenter={() => (selected = i)}
+          onclick={() => paste(item.id)}
+          onkeydown={(e) => {
+            if (e.key === "Enter") paste(item.id);
+          }}
         >
           {#if item.kind === "image"}
             <div class="thumb-wrap">
@@ -345,6 +368,9 @@
     padding: 48px 0;
     white-space: pre-line;
     line-height: 1.8;
+  }
+  .error-msg {
+    color: var(--danger);
   }
 
   .footer {
