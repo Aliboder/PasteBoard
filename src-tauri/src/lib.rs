@@ -2,6 +2,7 @@ mod clipboard;
 mod commands;
 mod db;
 mod dedup;
+mod file_icons;
 mod models;
 mod monitor;
 mod paste;
@@ -10,16 +11,23 @@ mod store;
 
 use state::AppState;
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Manager, PhysicalPosition, Position,
+    AppHandle, Manager,
 };
+use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-use windows::Win32::Foundation::POINT;
+use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+};
+
+/// 托盘"开机自启"勾选项句柄（用于切换勾选状态）
+static AUTOSTART_ITEM: std::sync::OnceLock<CheckMenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
 /// 极简日志器：输出到 stderr（tauri dev 会捕获）+ 日志文件（%APPDATA%/com.aliboder.pasteboard/pasteboard.log）
 struct SimpleLogger {
@@ -82,10 +90,18 @@ fn init_logger() {
     }
 }
 
-/// 计算弹出窗位置：跟随鼠标，横向居中于光标，纵向在光标下方；
-/// 自动钳制在光标所在显示器的工作区内
-fn popup_position(win_w: i32, win_h: i32) -> (i32, i32) {
+/// 计算弹出窗位置：跟随鼠标（横向居中于光标、纵向在光标下方），
+/// 全部使用 Win32 物理坐标（与 Tauri 的 DPI 换算无关），
+/// 并钳制在光标所在显示器的工作区内，窄屏时防护
+fn popup_position_physical(hwnd: windows::Win32::Foundation::HWND) -> (i32, i32) {
     unsafe {
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return (0, 0);
+        }
+        let win_w = rect.right - rect.left;
+        let win_h = rect.bottom - rect.top;
+
         let mut pt = POINT::default();
         if GetCursorPos(&mut pt).is_err() {
             return (0, 0); // 取不到光标则用系统默认位置
@@ -99,8 +115,17 @@ fn popup_position(win_w: i32, win_h: i32) -> (i32, i32) {
             return (0, 0);
         }
         let work = info.rcWork;
-        let x = (pt.x - win_w / 2).clamp(work.left + 8, work.right - win_w - 8);
-        let y = (pt.y + 16).clamp(work.top + 8, work.bottom - win_h - 8);
+        // 窗口大于工作区时避免 clamp 区间反转（clamp 要求 min<=max）
+        let x = if work.right - work.left > win_w + 16 {
+            (pt.x - win_w / 2).clamp(work.left + 8, work.right - win_w - 8)
+        } else {
+            work.left + 8
+        };
+        let y = if work.bottom - work.top > win_h + 16 {
+            (pt.y + 16).clamp(work.top + 8, work.bottom - win_h - 8)
+        } else {
+            work.top + 8
+        };
         (x, y)
     }
 }
@@ -127,20 +152,57 @@ fn toggle_main_window(app: &AppHandle) {
                     .prev_sel_end
                     .store(ctx.sel_end, std::sync::atomic::Ordering::SeqCst);
             }
-            // 跟随鼠标定位
-            let (x, y) = popup_position(420, 620);
-            let _ = win.set_position(Position::Physical(PhysicalPosition::new(x, y)));
+            // 定位：跟随鼠标（可配置）或居中
+            let follow_mouse = app
+                .try_state::<AppState>()
+                .and_then(|s| {
+                    s.db
+                        .lock()
+                        .unwrap()
+                        .get_setting("follow_mouse")
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| "on".into());
+            if follow_mouse == "on" {
+                // 跟随鼠标定位：直接调用 Win32 API，避免 DPI 坐标换算偏差
+                if let Ok(hwnd) = win.hwnd() {
+                    let (x, y) = popup_position_physical(hwnd);
+                    unsafe {
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            x,
+                            y,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                    }
+                }
+            } else {
+                let _ = win.center();
+            }
             let _ = win.show();
             let _ = win.set_focus();
         }
     }
 }
 
-/// 构建系统托盘（显示/退出）
+/// 构建系统托盘（显示/退出/开机自启）
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "显示 / 隐藏", true, None::<&str>)?;
+    let autostart = CheckMenuItem::with_id(
+        app,
+        "autostart",
+        "开机自启",
+        true,
+        app.autolaunch().is_enabled().unwrap_or(false),
+        None::<&str>,
+    )?;
+    let _ = AUTOSTART_ITEM.set(autostart.clone());
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&toggle, &quit])?;
+    let menu = Menu::with_items(app, &[&toggle, &autostart, &quit])?;
 
     TrayIconBuilder::with_id("main-tray")
         .icon(app.default_window_icon().unwrap().clone())
@@ -148,6 +210,24 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "toggle" => toggle_main_window(app),
+            "autostart" => {
+                let enabled = app.autolaunch().is_enabled().unwrap_or(false);
+                let result = if enabled {
+                    app.autolaunch().disable()
+                } else {
+                    app.autolaunch().enable()
+                };
+                match result {
+                    Ok(()) => {
+                        let new_state = !enabled;
+                        if let Some(item) = AUTOSTART_ITEM.get() {
+                            let _ = item.set_checked(new_state);
+                        }
+                        log::info!("autostart set to {new_state}");
+                    }
+                    Err(e) => log::error!("failed to toggle autostart: {e}"),
+                }
+            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -155,14 +235,18 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 注册全局热键：Ctrl+Shift+V 切换主窗口
-fn setup_hotkey(app: &AppHandle) {
-    if let Err(e) = app.global_shortcut().on_shortcut("Ctrl+Shift+V", |app, _shortcut, event| {
-        if event.state() == ShortcutState::Pressed {
-            toggle_main_window(app);
+/// 注册全局热键（先注销旧的）
+fn register_hotkey(app: &AppHandle, hotkey: &str) -> bool {
+    let _ = app.global_shortcut().unregister_all();
+    match app.global_shortcut().register(hotkey) {
+        Ok(_) => {
+            log::info!("hotkey registered: {hotkey}");
+            true
         }
-    }) {
-        eprintln!("failed to register global shortcut: {e}");
+        Err(e) => {
+            log::error!("failed to register hotkey {hotkey}: {e}");
+            false
+        }
     }
 }
 
@@ -177,12 +261,21 @@ pub fn run() {
                 let _ = win.set_focus();
             }
         }))
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        toggle_main_window(app);
+                    }
+                })
+                .build(),
+        )
         .setup(|app| {
-            setup_tray(app.handle())?;
-            setup_hotkey(app.handle());
-
-            // 初始化数据目录与共享状态
+            // 1. 初始化数据目录与共享状态
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let state = AppState::new(data_dir.clone(), data_dir.join("pasteboard.db"))
@@ -190,7 +283,22 @@ pub fn run() {
             log::info!("data dir: {}", data_dir.display());
             app.manage(state);
 
-            // 启动剪贴板监听（事件驱动 + 轮询兜底）
+            // 2. 注册全局热键（使用已保存的自定义热键）
+            let saved_hotkey = app
+                .state::<AppState>()
+                .db
+                .lock()
+                .unwrap()
+                .get_setting("hotkey")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "Ctrl+Shift+V".into());
+            register_hotkey(app.handle(), &saved_hotkey);
+
+            // 3. 系统托盘
+            setup_tray(app.handle())?;
+
+            // 4. 启动剪贴板监听（事件驱动 + 轮询兜底）
             monitor::start(app.handle().clone());
             Ok(())
         })
@@ -201,8 +309,16 @@ pub fn run() {
             commands::clear_history,
             commands::get_settings,
             commands::set_max_items,
+            commands::set_theme,
+            commands::set_toggle,
+            commands::set_autostart,
+            commands::set_window_size,
+            commands::set_hotkey,
             commands::get_thumb,
             commands::get_image,
+            commands::get_file_icon,
+            commands::get_file_thumb,
+            commands::get_file_preview,
             commands::paste_item,
         ])
         .run(tauri::generate_context!())

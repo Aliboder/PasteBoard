@@ -12,14 +12,12 @@ pub struct Db {
 #[derive(Debug)]
 pub enum DbError {
     Sql(rusqlite::Error),
-    InvalidKind(String),
 }
 
 impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DbError::Sql(e) => write!(f, "sqlite error: {e}"),
-            DbError::InvalidKind(k) => write!(f, "invalid kind: {k}"),
         }
     }
 }

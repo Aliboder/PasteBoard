@@ -15,6 +15,13 @@ export interface ItemDto {
 
 export interface SettingsDto {
   max_items: number;
+  theme: string;
+  follow_mouse: string;
+  keep_open: string;
+  always_on_top: string;
+  win_w: number;
+  win_h: number;
+  autostart: boolean;
 }
 
 export async function getHistory(
@@ -45,12 +52,44 @@ export async function getImage(id: number): Promise<string | null> {
   return invoke("get_image", { id });
 }
 
+export async function getFileIcon(path: string): Promise<string | null> {
+  return invoke("get_file_icon", { path });
+}
+
+export async function getFileThumb(path: string): Promise<string | null> {
+  return invoke("get_file_thumb", { path });
+}
+
+export async function getFilePreview(path: string): Promise<string | null> {
+  return invoke("get_file_preview", { path });
+}
+
 export async function getSettings(): Promise<SettingsDto> {
   return invoke("get_settings");
 }
 
 export async function setMaxItems(maxItems: number): Promise<void> {
   return invoke("set_max_items", { maxItems });
+}
+
+export async function setTheme(theme: string): Promise<void> {
+  return invoke("set_theme", { theme });
+}
+
+export async function setToggle(key: string, value: "on" | "off"): Promise<void> {
+  return invoke("set_toggle", { key, value });
+}
+
+export async function setAutostart(enabled: boolean): Promise<void> {
+  return invoke("set_autostart", { enabled });
+}
+
+export async function setWindowSize(w: number, h: number): Promise<void> {
+  return invoke("set_window_size", { w, h });
+}
+
+export async function setHotkey(hotkey: string): Promise<void> {
+  return invoke("set_hotkey", { hotkey });
 }
 
 /** 订阅剪贴板变化事件（新条目 / 上限清理），返回取消订阅函数 */
