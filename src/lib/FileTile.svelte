@@ -3,8 +3,7 @@
   import { getFileIcon, getFileThumb } from "./api";
   import { FileText } from "lucide-svelte";
 
-  let { path, name, horizontal = false }: { path: string; name: string; horizontal?: boolean } =
-    $props();
+  let { path, name }: { path: string; name: string } = $props();
 
   /** 可直接预览的图片扩展名 */
   const IMAGE_EXTS = new Set([
@@ -43,18 +42,7 @@
   });
 </script>
 
-{#if horizontal}
-  {#if kind === "thumb"}
-    <img class="h-thumb" src="data:image/png;base64,{src}" alt={name} draggable="false" />
-  {:else if kind === "icon"}
-    <img class="h-icon" src="data:image/png;base64,{src}" alt={name} draggable="false" />
-  {:else}
-    <span class="h-fallback">
-      <FileText size={20} />
-    </span>
-  {/if}
-  <span class="h-name">{name}</span>
-{:else if kind === "thumb"}
+{#if kind === "thumb"}
   <img class="tile-thumb" src="data:image/png;base64,{src}" alt={name} draggable="false" />
 {:else if kind === "icon"}
   <img class="tile-icon" src="data:image/png;base64,{src}" alt={name} draggable="false" />
@@ -67,37 +55,6 @@
 {/if}
 
 <style>
-  .h-thumb {
-    width: 40px;
-    height: 40px;
-    border-radius: 6px;
-    object-fit: cover;
-    flex-shrink: 0;
-  }
-  .h-icon {
-    width: 32px;
-    height: 32px;
-    flex-shrink: 0;
-  }
-  .h-fallback {
-    width: 32px;
-    height: 32px;
-    color: var(--text-dim);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
-  .h-name {
-    flex: 1;
-    min-width: 0;
-    font-size: 12.5px;
-    color: var(--text);
-    text-align: left;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   .tile-thumb {
     width: 100%;
     height: 100%;

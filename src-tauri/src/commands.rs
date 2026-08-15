@@ -24,7 +24,27 @@ impl From<crate::db::DbError> for CommandError {
 
 type CmdResult<T> = Result<T, CommandError>;
 
-/// 历史列表（可搜索、按类型筛选、分页）；图片原图文件已缺失的条目自动隐藏（数据库保留）
+/// 可预览图片扩展名（文件条目是否算"图片"的判定口径，与前端一致）
+const IMAGE_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "avif", "tif", "tiff",
+];
+
+/// 文件条目的首个文件是否为图片（网格/横条展示的就是首个文件）
+fn first_file_is_image(item: &Item) -> bool {
+    let paths: Vec<String> =
+        serde_json::from_str(item.file_paths.as_deref().unwrap_or("[]")).unwrap_or_default();
+    let Some(first) = paths.first() else {
+        return false;
+    };
+    first
+        .rsplit('.')
+        .next()
+        .map(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// 历史列表（可搜索、按类型筛选、分页）；图片原图文件已缺失的条目自动隐藏（数据库保留）；
+/// "图片" Tab 额外包含文件条目中的图片文件（复制的图片文件）
 #[tauri::command]
 pub fn get_history(
     state: State<'_, AppState>,
@@ -47,6 +67,8 @@ pub fn get_history(
             .as_deref()
             .map(|p| std::path::Path::new(p).exists())
             .unwrap_or(false),
+        // 图片 Tab：文件条目仅保留首个文件为图片的
+        crate::models::ItemKind::Files => kind.as_deref() != Some("image") || first_file_is_image(it),
         _ => true,
     });
     Ok(items.iter().map(|i| to_dto(&state, i)).collect())
@@ -99,6 +121,44 @@ pub fn clear_all_history(state: State<'_, AppState>) -> CmdResult<u32> {
 #[tauri::command]
 pub fn paste_item(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     crate::paste::paste_item(&state, id).map_err(|m| CommandError { message: m })
+}
+
+/// 复制条目到剪贴板（不粘贴，右键菜单用）
+#[tauri::command]
+pub fn copy_item(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    let item = {
+        let db = state.db.lock().unwrap();
+        db.get_item(id)
+            .map_err(|e| CommandError { message: e.to_string() })?
+            .ok_or(CommandError {
+                message: "item not found".into(),
+            })?
+    };
+    crate::paste::write_item_clipboard(&state, &item).map_err(|m| CommandError { message: m })
+}
+
+/// 打开文件所在位置（资源管理器定位）
+#[tauri::command]
+pub fn open_file_location(path: String) -> CmdResult<()> {
+    std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{path}"))
+        .spawn()
+        .map_err(|e| CommandError {
+            message: format!("无法打开所在位置: {e}"),
+        })?;
+    Ok(())
+}
+
+/// 用默认程序打开文件
+#[tauri::command]
+pub fn open_file(path: String) -> CmdResult<()> {
+    std::process::Command::new("explorer.exe")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| CommandError {
+            message: format!("无法打开文件: {e}"),
+        })?;
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -299,7 +359,7 @@ pub fn get_stats(state: State<'_, AppState>) -> CmdResult<StatsDto> {
     let count = |kind: &str| -> i64 {
         db.count_by_kind(kind).unwrap_or(0)
     };
-    let total: i64 = db.list_items("", None, i64::MAX, 0).map(|v| v.len() as i64).unwrap_or(0);
+    let total: i64 = db.count_all().unwrap_or(0);
     let db_path = state.store.root().join("pasteboard.db");
     let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     let media_size = dir_size(&state.store.root().join("images"))
@@ -348,13 +408,24 @@ pub fn set_hotkey(
     hotkey: String,
 ) -> CmdResult<()> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let db = state.db.lock().unwrap();
+    // 与当前热键相同则无需重新注册
+    if db.get_setting("hotkey").ok().flatten().as_deref() == Some(hotkey.as_str()) {
+        return Ok(());
+    }
+    // 先注册新键：失败时旧热键仍然有效，不会出现"无热键"状态
+    app.global_shortcut()
+        .register(hotkey.as_str())
+        .map_err(|e| CommandError {
+            message: format!("快捷键无效或已被其他程序占用：{e}"),
+        })?;
+    // 成功：注销全部（旧键 + 刚注册的新键）后只注册新键，保证唯一
     let _ = app.global_shortcut().unregister_all();
     app.global_shortcut()
         .register(hotkey.as_str())
         .map_err(|e| CommandError {
             message: format!("快捷键无效或已被其他程序占用：{e}"),
         })?;
-    let db = state.db.lock().unwrap();
     db.set_setting("hotkey", &hotkey)?;
     log::info!("hotkey changed to {hotkey}");
     Ok(())

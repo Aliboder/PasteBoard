@@ -1,4 +1,4 @@
-<script lang="ts">
+﻿<script lang="ts">
   import { onMount } from "svelte";
   import "../lib/theme.css";
   import {
@@ -8,6 +8,9 @@
     clearHistory,
     clearAllHistory,
     pasteItem,
+    copyItem,
+    openFileLocation,
+    openFile,
     getImage,
     getFilePreview,
     getSettings,
@@ -35,6 +38,7 @@
     Pin,
     PinOff,
     Star,
+    ExternalLink,
     Palette,
     Sliders,
     Keyboard,
@@ -66,10 +70,10 @@
   let textItems = $derived(items.filter((i) => i.kind === "text"));
 
   // ---------- 文本列表虚拟滚动 ----------
-  /** 行高三档：1 行 / 2 行 / 3 行（与 .row 内 padding + title 行高 + time 一致，留 3~4px 裕量） */
-  const ROW_H_SHORT = 56;
-  const ROW_H_MID = 76;
-  const ROW_H_LONG = 96;
+  /** 行高三档：1 行 / 2 行 / 3 行（内容高 + 1px 描边 + 6px 行距） */
+  const ROW_H_SHORT = 62;
+  const ROW_H_MID = 82;
+  const ROW_H_LONG = 102;
   /** 视口上下各多渲染的行数（缓冲） */
   const VIRTUAL_BUFFER = 4;
   let listEl: HTMLElement | undefined = $state();
@@ -180,6 +184,17 @@
   let stats = $state<StatsDto | null>(null);
   let clearMenuOpen = $state(false);
   let captureBoxEl: HTMLElement | undefined = $state();
+  /** 二次确认：待确认删除的固定条目 id（3 秒未再点复位） */
+  let confirmDeleteId = $state<number | null>(null);
+  let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 二次确认：清空全部（含固定） */
+  let confirmClearAll = $state(false);
+  /** 网格（图片/文件 Tab）键盘导航选中索引 */
+  let gridSelected = $state(-1);
+  /** 网格容器引用（当前 Tab 只有一个网格） */
+  let gridEl: HTMLElement | undefined = $state();
+  /** 右键菜单 */
+  let ctxMenu = $state<{ x: number; y: number; item: ItemDto } | null>(null);
 
   /** 进入录制模式时聚焦录制框 */
   $effect(() => {
@@ -187,7 +202,9 @@
   });
   let hoverPreview = $state<{ src: string; top: number; height: number } | null>(null);
   let textPreview = $state<{ text: string; top: number; height: number } | null>(null);
+  /** 悬停预览缓存（上限 30 张，LRU 淘汰，防长时间运行内存膨胀） */
   const previewCache = new Map<number, string>();
+  const PREVIEW_CACHE_MAX = 30;
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let textHoverTimer: ReturnType<typeof setTimeout> | null = null;
   let listSectionEl: HTMLElement | undefined = $state();
@@ -260,6 +277,26 @@
     yesterday.setDate(now.getDate() - 1);
     if (d.toDateString() === yesterday.toDateString()) return `昨天 ${hhmm}`;
     return `${d.getMonth() + 1}-${d.getDate()} ${hhmm}`;
+  }
+
+  /** 搜索关键字高亮：把文本切成 [普通, 匹配, 普通...] 片段（大小写不敏感，与 SQL LIKE 一致） */
+  function splitHighlight(text: string, keyword: string): { t: string; m: boolean }[] {
+    if (!keyword) return [{ t: text, m: false }];
+    const lower = text.toLowerCase();
+    const kw = keyword.toLowerCase();
+    const out: { t: string; m: boolean }[] = [];
+    let i = 0;
+    while (i < text.length) {
+      const idx = lower.indexOf(kw, i);
+      if (idx < 0) {
+        out.push({ t: text.slice(i), m: false });
+        break;
+      }
+      if (idx > i) out.push({ t: text.slice(i, idx), m: false });
+      out.push({ t: text.slice(idx, idx + kw.length), m: true });
+      i = idx + kw.length;
+    }
+    return out;
   }
 
   async function openSettings() {
@@ -413,10 +450,24 @@
 
   async function reload() {
     loading = true;
-    items = await getHistory(filter, kindFilter, 500, 0);
+    try {
+      items = await getHistory(filter, kindFilter, 500, 0);
+    } catch (e) {
+      // 数据库异常等场景：提示而非卡死"加载中"
+      showError(e);
+      items = [];
+    }
     if (selected >= textItems.length) selected = -1;
+    if (gridSelected >= topItems.length) gridSelected = -1;
     loading = false;
   }
+
+  /** 网格键盘导航：选中卡片滚动进视野 */
+  $effect(() => {
+    if (gridSelected < 0 || !gridEl) return;
+    const card = gridEl.querySelectorAll(".grid-item")[gridSelected] as HTMLElement | undefined;
+    card?.scrollIntoView({ block: "nearest" });
+  });
 
   /** 横向卡片显示名：取文件名（多文件时加数量） */
   function fileName(item: ItemDto): string {
@@ -429,7 +480,16 @@
     if (ok) await reload();
   }
 
+  /** 删除：固定条目需二次确认（3 秒内再点一次），非固定一键删除 */
   async function remove(item: ItemDto) {
+    if (item.pinned && confirmDeleteId !== item.id) {
+      confirmDeleteId = item.id;
+      if (confirmTimer) clearTimeout(confirmTimer);
+      confirmTimer = setTimeout(() => (confirmDeleteId = null), 3000);
+      return;
+    }
+    if (confirmTimer) clearTimeout(confirmTimer);
+    confirmDeleteId = null;
     await deleteItem(item.id);
     await reload();
   }
@@ -443,7 +503,15 @@
     settingsMsg = `已清空 ${n} 条非固定历史`;
   }
 
+  /** 清空全部（含固定）：需二次确认 */
   async function clearAllItems() {
+    if (!confirmClearAll) {
+      confirmClearAll = true;
+      settingsMsg = "⚠️ 再点一次确认清空全部（含固定）";
+      setTimeout(() => (confirmClearAll = false), 3000);
+      return;
+    }
+    confirmClearAll = false;
     clearMenuOpen = false;
     const n = await clearAllHistory();
     await reload();
@@ -485,7 +553,14 @@
           if (!PREVIEW_IMAGE_EXTS.has(ext)) return;
           src = (await getFilePreview(path)) ?? "";
         }
-        if (src) previewCache.set(item.id, src);
+        if (src) {
+          previewCache.delete(item.id);
+          previewCache.set(item.id, src);
+          if (previewCache.size > PREVIEW_CACHE_MAX) {
+            const oldest = previewCache.keys().next().value;
+            if (oldest !== undefined) previewCache.delete(oldest);
+          }
+        }
       }
       if (!src) return;
       const MAX_H = 300;
@@ -540,11 +615,64 @@
     textPreview = null;
   }
 
-  /** 全局键盘：↑↓ 选择、Enter 粘贴、Esc 关闭、数字 1~9 快捷粘贴、Delete 删除（作用于文本区） */
+  /** 网格列数：读计算样式，图片 Tab 自适应、文件 Tab 固定 5 列 */
+  function gridCols(): number {
+    if (!gridEl) return 1;
+    return getComputedStyle(gridEl).gridTemplateColumns.split(" ").filter(Boolean).length || 1;
+  }
+
+  /** 网格键盘导航（图片/文件 Tab）：方向键移动、Enter 粘贴、Delete 删除 */
+  function gridKeydown(e: KeyboardEvent, inInput: boolean) {
+    const list = topItems;
+    if (!list.length) return;
+    const cols = gridCols();
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      gridSelected = (gridSelected + 1) % list.length;
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      gridSelected = gridSelected <= 0 ? list.length - 1 : gridSelected - 1;
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      gridSelected = Math.min(list.length - 1, (gridSelected < 0 ? 0 : gridSelected) + cols);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      gridSelected = Math.max(0, (gridSelected < 0 ? cols : gridSelected) - cols);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (gridSelected >= 0 && list[gridSelected]) paste(list[gridSelected].id);
+      else if (list.length) paste(list[0].id);
+    } else if (e.key === "Delete" && !inInput) {
+      if (gridSelected >= 0 && list[gridSelected]) remove(list[gridSelected]);
+    }
+  }
+
+  /** 全局键盘：↑↓ 选择、Enter 粘贴、Esc 关闭、数字 1~9 快捷粘贴、Delete 删除 */
   function globalKeydown(e: KeyboardEvent) {
     // 快捷键录制期间由录制框独占键盘
     if (hotkeyCapture) return;
+    if (e.key === "Escape") {
+      if (ctxMenu) {
+        ctxMenu = null;
+        return;
+      }
+      if (textPreview) {
+        hideTextPreview();
+        return;
+      }
+      if (hoverPreview) {
+        hidePreview();
+        return;
+      }
+      getCurrentWindow().hide();
+      return;
+    }
     const inInput = document.activeElement?.tagName === "INPUT";
+    // 图片/文件 Tab：网格导航
+    if (kindFilter === "image" || kindFilter === "files") {
+      gridKeydown(e, inInput);
+      return;
+    }
     if (e.key === "ArrowDown") {
       e.preventDefault();
       if (textItems.length) selected = (selected + 1) % textItems.length;
@@ -554,13 +682,68 @@
     } else if (e.key === "Enter") {
       e.preventDefault();
       if (selected >= 0 && textItems[selected]) paste(textItems[selected].id);
-    } else if (e.key === "Escape") {
-      getCurrentWindow().hide();
+      else if (filter && textItems.length) paste(textItems[0].id);
     } else if (e.key === "Delete" && !inInput) {
       if (selected >= 0 && textItems[selected]) remove(textItems[selected]);
     } else if (/^[1-9]$/.test(e.key) && !inInput) {
       const idx = parseInt(e.key, 10) - 1;
       if (textItems[idx]) paste(textItems[idx].id);
+    }
+  }
+
+  /** 右键菜单：打开（位置钳制在窗口内） */
+  function openCtxMenu(e: MouseEvent, item: ItemDto) {
+    e.preventDefault();
+    ctxMenu = {
+      x: Math.min(e.clientX, window.innerWidth - 150),
+      y: Math.min(e.clientY, window.innerHeight - 150),
+      item,
+    };
+  }
+
+  function closeCtxMenu() {
+    ctxMenu = null;
+  }
+
+  /** 右键菜单：复制条目到剪贴板（不粘贴） */
+  async function ctxCopy(item: ItemDto) {
+    closeCtxMenu();
+    try {
+      await copyItem(item.id);
+      error = "已复制到剪贴板";
+      if (errorTimer) clearTimeout(errorTimer);
+      errorTimer = setTimeout(() => (error = ""), 2000);
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  /** 右键菜单：删除（固定条目同样二次确认） */
+  function ctxDelete(item: ItemDto) {
+    closeCtxMenu();
+    if (item.pinned && confirmDeleteId !== item.id) {
+      showError("固定条目需二次确认：请再点一次卡片上的删除按钮");
+    }
+    remove(item);
+  }
+
+  /** 右键菜单：打开文件所在位置 */
+  async function ctxOpenLocation(item: ItemDto) {
+    closeCtxMenu();
+    try {
+      await openFileLocation(item.preview);
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  /** 右键菜单：打开文件 */
+  async function ctxOpenFile(item: ItemDto) {
+    closeCtxMenu();
+    try {
+      await openFile(item.preview);
+    } catch (e) {
+      showError(e);
     }
   }
 
@@ -770,7 +953,13 @@
             ></div>
             <div class="menu">
               <button onclick={clearUnpinned}>清空非固定历史（保留固定）</button>
-              <button class="danger" onclick={clearAllItems}>清空全部历史（含固定）</button>
+              <button
+                class="danger"
+                class:confirm={confirmClearAll}
+                onclick={clearAllItems}
+              >
+                {confirmClearAll ? "⚠️ 确认清空全部！" : "清空全部历史（含固定）"}
+              </button>
             </div>
           {/if}
         </div>
@@ -842,6 +1031,7 @@
               onmouseenter={(e) => showPreview(item, e.currentTarget as HTMLElement)}
               onmouseleave={hidePreview}
               onclick={() => paste(item.id)}
+              oncontextmenu={(e) => openCtxMenu(e, item)}
               onkeydown={(e) => {
                 if (e.key === "Enter") paste(item.id);
               }}
@@ -874,13 +1064,18 @@
                 </button>
                 <button
                   class="icon-btn mini danger"
-                  title="删除"
+                  class:confirm={confirmDeleteId === item.id}
+                  title={confirmDeleteId === item.id ? "再点一次确认删除" : "删除"}
                   onclick={(e) => {
                     e.stopPropagation();
                     remove(item);
                   }}
                 >
-                  <X size={11} />
+                  {#if confirmDeleteId === item.id}
+                    <span class="confirm-txt">确认</span>
+                  {:else}
+                    <X size={11} />
+                  {/if}
                 </button>
               </div>
             </div>
@@ -901,28 +1096,42 @@
       {#if topItems.length === 0}
         <p class="strip-empty">暂无图片历史</p>
       {:else}
-        <div class="grid">
-          {#each topItems as item (item.id)}
+        <div class="grid" bind:this={gridEl}>
+          {#each topItems as item, gi (item.id)}
             <div
               class="grid-item"
               class:pinned={item.pinned}
+              class:selected={gi === gridSelected}
               role="option"
-              aria-selected={false}
+              aria-selected={gi === gridSelected}
               tabindex="-1"
-              title={`图片 · ${timeLabel(item.created_at)}`}
-              onmouseenter={(e) => showPreview(item, e.currentTarget as HTMLElement)}
+              title={item.kind === "image"
+                ? `图片 · ${timeLabel(item.created_at)}`
+                : `${item.preview} · ${timeLabel(item.created_at)}`}
+              onmouseenter={(e) => {
+                gridSelected = gi;
+                showPreview(item, e.currentTarget as HTMLElement);
+              }}
               onmouseleave={hidePreview}
               onclick={() => paste(item.id)}
+              oncontextmenu={(e) => openCtxMenu(e, item)}
               onkeydown={(e) => {
                 if (e.key === "Enter") paste(item.id);
               }}
             >
-              {#if item.thumb}
-                <img src="data:image/png;base64,{item.thumb}" alt="图片" draggable="false" />
+              {#if item.kind === "image"}
+                {#if item.thumb}
+                  <img src="data:image/png;base64,{item.thumb}" alt="图片" draggable="false" />
+                {:else}
+                  <span class="strip-placeholder">
+                    <ImageIcon size={16} />
+                  </span>
+                {/if}
               {:else}
-                <span class="strip-placeholder">
-                  <ImageIcon size={16} />
-                </span>
+                <!-- 复制的图片文件：图标/缩略图 + 文件名（竖排） -->
+                <div class="grid-file">
+                  <FileTile path={item.preview} name={fileName(item)} />
+                </div>
               {/if}
               {#if item.pinned}
                 <span class="grid-pin-badge">
@@ -947,13 +1156,18 @@
                 </button>
                 <button
                   class="icon-btn mini danger"
-                  title="删除"
+                  class:confirm={confirmDeleteId === item.id}
+                  title={confirmDeleteId === item.id ? "再点一次确认删除" : "删除"}
                   onclick={(e) => {
                     e.stopPropagation();
                     remove(item);
                   }}
                 >
-                  <X size={11} />
+                  {#if confirmDeleteId === item.id}
+                    <span class="confirm-txt">确认</span>
+                  {:else}
+                    <X size={11} />
+                  {/if}
                 </button>
               </div>
             </div>
@@ -962,8 +1176,8 @@
       {/if}
     </section>
     {:else if kindFilter === "files"}
-    <!-- 文件 Tab：纵向列表，图标 + 名称 + 路径 -->
-    <section class="file-section">
+    <!-- 文件 Tab：网格形式，图片文件显示缩略图，其余显示系统图标 -->
+    <section class="grid-section">
       <div class="section-header">
         <span class="section-title">
           <Folder size={12} />
@@ -974,27 +1188,39 @@
       {#if topItems.length === 0}
         <p class="strip-empty">暂无文件历史</p>
       {:else}
-        <div class="file-list">
-          {#each topItems as item (item.id)}
+        <div class="grid grid-5" bind:this={gridEl}>
+          {#each topItems as item, gi (item.id)}
             <div
-              class="file-row"
+              class="grid-item"
               class:pinned={item.pinned}
+              class:selected={gi === gridSelected}
               role="option"
-              aria-selected={false}
+              aria-selected={gi === gridSelected}
               tabindex="-1"
               title={`${item.preview} · ${timeLabel(item.created_at)}`}
-              onmouseenter={(e) => showPreview(item, e.currentTarget as HTMLElement)}
+              onmouseenter={(e) => {
+                gridSelected = gi;
+                showPreview(item, e.currentTarget as HTMLElement);
+              }}
               onmouseleave={hidePreview}
               onclick={() => paste(item.id)}
+              oncontextmenu={(e) => openCtxMenu(e, item)}
               onkeydown={(e) => {
                 if (e.key === "Enter") paste(item.id);
               }}
             >
-              <FileTile path={item.preview} name={fileName(item)} horizontal />
-              <span class="file-time">{timeLabel(item.created_at)}</span>
-              <div class="actions">
+              <div class="grid-file">
+                <FileTile path={item.preview} name={fileName(item)} />
+              </div>
+              {#if item.pinned}
+                <span class="grid-pin-badge">
+                  <Star size={11} fill="currentColor" />
+                </span>
+              {/if}
+              <span class="grid-time">{timeLabel(item.created_at)}</span>
+              <div class="grid-actions">
                 <button
-                  class="icon-btn {item.pinned ? 'active' : ''}"
+                  class="icon-btn mini {item.pinned ? 'active' : ''}"
                   title={item.pinned ? "取消固定" : "固定"}
                   onclick={(e) => {
                     e.stopPropagation();
@@ -1002,20 +1228,25 @@
                   }}
                 >
                   {#if item.pinned}
-                    <Pin size={13} fill="currentColor" />
+                    <Pin size={11} fill="currentColor" />
                   {:else}
-                    <PinOff size={13} />
+                    <PinOff size={11} />
                   {/if}
                 </button>
                 <button
-                  class="icon-btn danger"
-                  title="删除"
+                  class="icon-btn mini danger"
+                  class:confirm={confirmDeleteId === item.id}
+                  title={confirmDeleteId === item.id ? "再点一次确认删除" : "删除"}
                   onclick={(e) => {
                     e.stopPropagation();
                     remove(item);
                   }}
                 >
-                  <X size={13} />
+                  {#if confirmDeleteId === item.id}
+                    <span class="confirm-txt">确认</span>
+                  {:else}
+                    <X size={11} />
+                  {/if}
                 </button>
               </div>
             </div>
@@ -1065,19 +1296,30 @@
                 }}
                 onmouseleave={hideTextPreview}
                 onclick={() => paste(item.id)}
+                oncontextmenu={(e) => openCtxMenu(e, item)}
                 onkeydown={(e) => {
                   if (e.key === "Enter") paste(item.id);
                 }}
               >
-                <div class="meta">
-                  <span class="title">
-                    {#if item.pinned}
-                      <Star size={11} fill="currentColor" class="pin-star" />
-                    {/if}
+              <div class="meta">
+                <span class="title">
+                  {#if item.pinned}
+                    <Star size={11} fill="currentColor" class="pin-star" />
+                  {/if}
+                  {#if filter}
+                    {#each splitHighlight(item.preview, filter) as part, pi (pi)}
+                      {#if part.m}
+                        <mark class="hl">{part.t}</mark>
+                      {:else}
+                        {part.t}
+                      {/if}
+                    {/each}
+                  {:else}
                     {item.preview}
-                  </span>
-                  <span class="time">{timeLabel(item.created_at)}</span>
-                </div>
+                  {/if}
+                </span>
+                <span class="time">{timeLabel(item.created_at)}</span>
+              </div>
 
                 <div class="actions">
                   <button
@@ -1096,13 +1338,18 @@
                   </button>
                   <button
                     class="icon-btn danger"
-                    title="删除"
+                    class:confirm={confirmDeleteId === item.id}
+                    title={confirmDeleteId === item.id ? "再点一次确认删除" : "删除"}
                     onclick={(e) => {
                       e.stopPropagation();
                       remove(item);
                     }}
                   >
-                    <X size={13} />
+                    {#if confirmDeleteId === item.id}
+                      <span class="confirm-txt">确认</span>
+                    {:else}
+                      <X size={13} />
+                    {/if}
                   </button>
                 </div>
               </div>
@@ -1135,6 +1382,45 @@
   <!-- 错误提示 toast（不遮挡列表，3 秒自动消失） -->
   {#if error}
     <div class="toast">{error}</div>
+  {/if}
+
+  <!-- 条目右键菜单 -->
+  {#if ctxMenu}
+    <div
+      class="ctx-backdrop"
+      role="presentation"
+      onclick={closeCtxMenu}
+      oncontextmenu={(e) => e.preventDefault()}
+      onkeydown={() => {}}
+    ></div>
+    <div class="ctx-menu" style="left: {ctxMenu.x}px; top: {ctxMenu.y}px">
+      <button onclick={() => ctxCopy(ctxMenu!.item)}>
+        <ClipboardList size={12} />
+        复制
+      </button>
+      <button onclick={() => {
+        const item = ctxMenu!.item;
+        closeCtxMenu();
+        togglePin(item);
+      }}>
+        <Pin size={12} />
+        {ctxMenu!.item.pinned ? "取消固定" : "固定"}
+      </button>
+      {#if ctxMenu!.item.kind === "files"}
+        <button onclick={() => ctxOpenLocation(ctxMenu!.item)}>
+          <Folder size={12} />
+          打开所在位置
+        </button>
+        <button onclick={() => ctxOpenFile(ctxMenu!.item)}>
+          <ExternalLink size={12} />
+          打开文件
+        </button>
+      {/if}
+      <button class="danger" onclick={() => ctxDelete(ctxMenu!.item)}>
+        <X size={12} />
+        删除
+      </button>
+    </div>
   {/if}
 
   <!-- 底部提示（也可拖动窗口） -->
@@ -1234,6 +1520,19 @@
     justify-content: center;
     padding: 0;
     transition: background 0.12s, color 0.12s;
+  }
+  /* 二次确认态：红色实心按钮 */
+  .icon-btn.confirm {
+    background: var(--danger);
+    color: #fff;
+    width: auto;
+    padding: 0 6px;
+    border-radius: 6px;
+  }
+  .confirm-txt {
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
   }
   .icon-btn:hover {
     background: var(--bg-hover);
@@ -1493,6 +1792,11 @@
   .menu button.danger {
     color: var(--danger);
   }
+  .menu button.danger.confirm {
+    background: var(--danger);
+    color: #fff;
+    font-weight: 700;
+  }
 
   /* 内容区：上横向区 + 下文本区 */
   .content {
@@ -1643,6 +1947,16 @@
     align-content: start;
     padding: 2px 0 8px;
   }
+  .grid::-webkit-scrollbar {
+    width: 6px;
+  }
+  .grid::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+  }
+  .grid-5 {
+    grid-template-columns: repeat(5, 1fr);
+  }
   .grid-item {
     position: relative;
     aspect-ratio: 1;
@@ -1669,17 +1983,27 @@
   .grid-item.pinned {
     box-shadow: inset 0 0 0 1px var(--accent);
   }
+  .grid-item.selected {
+    box-shadow: inset 0 0 0 2px var(--accent);
+    border-color: var(--accent);
+  }
   .grid-time {
     position: absolute;
-    right: 4px;
-    bottom: 4px;
-    font-size: 9.5px;
+    right: 3px;
+    top: 3px;
+    font-size: 8.5px;
+    line-height: 1.3;
     color: #fff;
-    background: rgba(0, 0, 0, 0.55);
-    padding: 1px 5px;
+    background: rgba(0, 0, 0, 0.45);
+    padding: 1px 4px;
     border-radius: 4px;
     font-family: "Cascadia Mono", Consolas, monospace;
     pointer-events: none;
+    transition: opacity 0.12s;
+  }
+  /* 悬停时时间让位给右上角操作按钮 */
+  .grid-item:hover .grid-time {
+    opacity: 0;
   }
   .grid-pin-badge {
     position: absolute;
@@ -1689,6 +2013,16 @@
     display: flex;
     filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
     pointer-events: none;
+  }
+  .grid-file {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 4px;
   }
   .grid-actions {
     position: absolute;
@@ -1701,54 +2035,6 @@
   }
   .grid-item:hover .grid-actions {
     opacity: 1;
-  }
-
-  /* 文件 Tab：纵向列表 */
-  .file-section {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    padding: 2px 10px 6px;
-  }
-  .file-list {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 2px 0 8px;
-  }
-  .file-row {
-    position: relative;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 10px;
-    margin-bottom: 3px;
-    border-radius: 9px;
-    cursor: pointer;
-    transition: background 0.12s;
-  }
-  .file-row:hover {
-    background: var(--bg-hover);
-  }
-  .file-row.pinned {
-    background: color-mix(in srgb, var(--accent) 7%, transparent);
-  }
-  .file-row.pinned::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 8px;
-    bottom: 8px;
-    width: 2px;
-    border-radius: 2px;
-    background: var(--accent);
-  }
-  .file-time {
-    color: var(--text-dim);
-    font-size: 10.5px;
-    font-family: "Cascadia Mono", Consolas, monospace;
-    flex-shrink: 0;
   }
 
   /* 下方：文本列表 */
@@ -1838,6 +2124,46 @@
     box-shadow: inset 0 0 0 1px var(--accent);
   }
 
+  /* 条目右键菜单 */
+  .ctx-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+  }
+  .ctx-menu {
+    position: fixed;
+    z-index: 91;
+    min-width: 132px;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+  }
+  .ctx-menu button {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    text-align: left;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--text);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .ctx-menu button:hover {
+    background: var(--bg-hover);
+  }
+  .ctx-menu button.danger {
+    color: var(--danger);
+  }
+
   .row {
     position: absolute;
     left: 0;
@@ -1845,16 +2171,19 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 8px 10px;
+    padding: 7px 10px;
     border-radius: 9px;
+    border: 1px solid var(--border-strong);
     cursor: pointer;
-    transition: background 0.12s;
+    transition: background 0.12s, border-color 0.12s;
   }
   .row:hover {
     background: var(--bg-hover);
+    border-color: var(--accent);
   }
   .row.selected {
     background: var(--accent-soft);
+    border-color: var(--accent);
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
   }
 
@@ -1904,6 +2233,13 @@
     font-family: "Cascadia Mono", Consolas, monospace;
     letter-spacing: 0.2px;
     opacity: 0.85;
+  }
+  /* 搜索关键字高亮 */
+  .hl {
+    background: color-mix(in srgb, var(--accent) 28%, transparent);
+    color: var(--accent);
+    border-radius: 3px;
+    padding: 0 1px;
   }
 
   .actions {

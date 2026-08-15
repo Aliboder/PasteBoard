@@ -72,6 +72,16 @@ fn init_logger() {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    // 日志轮转：超过 1MB 时归档为 pasteboard.log.old（仅保留一份旧日志），防止长期运行无限增长
+    const LOG_MAX_BYTES: u64 = 1024 * 1024;
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > LOG_MAX_BYTES {
+            let old = path.with_extension("log.old");
+            let _ = std::fs::remove_file(&old);
+            let _ = std::fs::rename(&path, &old);
+            log::info!("log rotated: {} -> {}", path.display(), old.display());
+        }
+    }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -189,7 +199,7 @@ fn toggle_main_window(app: &AppHandle) {
     }
 }
 
-/// 构建系统托盘（显示/退出/开机自启）
+/// 构建系统托盘（显示/开机自启/退出）
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let toggle = MenuItem::with_id(app, "toggle", "显示 / 隐藏", true, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(
@@ -278,8 +288,13 @@ pub fn run() {
             // 1. 初始化数据目录与共享状态
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            crate::db::backup_database(&data_dir);
             let state = AppState::new(data_dir.clone(), data_dir.join("pasteboard.db"))
                 .expect("failed to init app state");
+            // 启动维护：数据库超过 8MB 时 VACUUM 回收碎片空间
+            if let Ok(db) = state.db.lock() {
+                let _ = db.vacuum_if_large(8 * 1024 * 1024);
+            }
             log::info!("data dir: {}", data_dir.display());
             app.manage(state);
 
@@ -325,6 +340,9 @@ pub fn run() {
             commands::get_file_thumb,
             commands::get_file_preview,
             commands::paste_item,
+            commands::copy_item,
+            commands::open_file_location,
+            commands::open_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

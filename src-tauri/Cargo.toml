@@ -1,6 +1,6 @@
 [package]
 name = "pasteboard"
-version = "0.4.0"
+version = "0.5.0"
 description = "本地剪贴板管理器 PasteBoard"
 authors = ["Yuan Jiawei"]
 edition = "2021"

@@ -1,7 +1,7 @@
 //! 粘贴回上一窗口：写剪贴板 → 还原前台窗口与焦点控件 → 模拟 Ctrl+V
 
 use crate::clipboard;
-use crate::models::ItemKind;
+use crate::models::{Item, ItemKind};
 use crate::state::AppState;
 use std::sync::atomic::Ordering;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -88,17 +88,9 @@ fn get_focus_control(hwnd: HWND) -> HWND {
     }
 }
 
-/// 把条目写回剪贴板并粘贴到唤起前的窗口
-pub fn paste_item(state: &AppState, id: i64) -> Result<(), String> {
-    // 1. 读取条目
-    let item = {
-        let db = state.db.lock().unwrap();
-        db.get_item(id)
-            .map_err(|e| e.to_string())?
-            .ok_or("item not found")?
-    };
-
-    // 2. 按类型写剪贴板（文本含富文本时同时写 CF_HTML）
+/// 把条目内容写入剪贴板（粘贴与"复制"共用），成功返回 Ok(())
+pub fn write_item_clipboard(state: &AppState, item: &Item) -> Result<(), String> {
+    // 按类型写剪贴板（文本含富文本时同时写 CF_HTML）
     let ok = match item.kind {
         ItemKind::Text => clipboard::write_text_rich(
             item.content.as_deref().unwrap_or_default(),
@@ -127,11 +119,25 @@ pub fn paste_item(state: &AppState, id: i64) -> Result<(), String> {
     if !ok {
         return Err("failed to write clipboard".into());
     }
-
-    // 3. 标记自身写入（监听侧跳过）
+    // 标记自身写入（监听侧跳过）
     state.mark_self_write();
+    Ok(())
+}
 
-    // 4. 还原前台窗口与焦点控件，恢复输入状态
+/// 把条目写回剪贴板并粘贴到唤起前的窗口
+pub fn paste_item(state: &AppState, id: i64) -> Result<(), String> {
+    // 1. 读取条目
+    let item = {
+        let db = state.db.lock().unwrap();
+        db.get_item(id)
+            .map_err(|e| e.to_string())?
+            .ok_or("item not found")?
+    };
+
+    // 2. 写剪贴板
+    write_item_clipboard(state, &item)?;
+
+    // 3. 还原前台窗口与焦点控件，恢复输入状态
     let win_hwnd = state.prev_foreground.load(Ordering::SeqCst);
     let focus_hwnd = state.prev_focus.load(Ordering::SeqCst);
     let sel_start = state.prev_sel_start.load(Ordering::SeqCst);
@@ -151,7 +157,7 @@ pub fn paste_item(state: &AppState, id: i64) -> Result<(), String> {
     // 恢复选中范围（光标/选中文本回到原位置）
     restore_selection(focus, sel_start, sel_end);
 
-    // 5. 等待窗口处理激活事件后再模拟 Ctrl+V
+    // 4. 等待窗口处理激活事件后再模拟 Ctrl+V
     std::thread::sleep(std::time::Duration::from_millis(60));
     send_ctrl_v();
     log::info!("pasted item {id} to hwnd={win_hwnd}");

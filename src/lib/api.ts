@@ -55,6 +55,18 @@ export async function pasteItem(id: number): Promise<void> {
   return invoke("paste_item", { id });
 }
 
+export async function copyItem(id: number): Promise<void> {
+  return invoke("copy_item", { id });
+}
+
+export async function openFileLocation(path: string): Promise<void> {
+  return invoke("open_file_location", { path });
+}
+
+export async function openFile(path: string): Promise<void> {
+  return invoke("open_file", { path });
+}
+
 export async function getImage(id: number): Promise<string | null> {
   return invoke("get_image", { id });
 }

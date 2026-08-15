@@ -43,7 +43,8 @@ unsafe extern "system" fn listener_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_CLIPBOARDUPDATE {
-        process_clipboard_change();
+        // wndproc 内不允许 panic（跨 FFI unwind 是未定义行为），异常时记录后继续
+        let _ = std::panic::catch_unwind(process_clipboard_change);
     }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
@@ -104,11 +105,17 @@ fn poll_thread() {
     let mut last_signature: Option<String> = None;
     loop {
         std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
-        let signature = clipboard_signature();
-        if signature.is_some() && signature != last_signature {
-            process_clipboard_change();
+        // 单次处理异常不得杀死线程（否则监听功能静默失效），记录后继续
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let signature = clipboard_signature();
+            if signature.is_some() && signature != last_signature {
+                process_clipboard_change();
+            }
+            last_signature = signature;
+        }));
+        if result.is_err() {
+            log::error!("poll thread recovered from panic");
         }
-        last_signature = signature;
     }
 }
 

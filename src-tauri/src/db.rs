@@ -40,6 +40,8 @@ impl Db {
     }
 
     fn init(&self) -> Result<(), DbError> {
+        // WAL：监听线程高频写库时提升并发，崩溃时更安全（-wal/-shm 文件伴随 db 生成）
+        self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS items (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,8 +167,13 @@ impl Db {
             args.push(Box::new(pattern));
         }
         if let Some(k) = kind {
-            sql.push_str(" AND kind = ?");
-            args.push(Box::new(k.to_string()));
+            if k == "image" {
+                // 图片 Tab 口径：图片条目 + 文件条目（文件中的图片由调用方精确过滤）
+                sql.push_str(" AND (kind = 'image' OR kind = 'files')");
+            } else {
+                sql.push_str(" AND kind = ?");
+                args.push(Box::new(k.to_string()));
+            }
         }
         sql.push_str(" ORDER BY pinned DESC, created_at DESC LIMIT ? OFFSET ?");
         args.push(Box::new(limit));
@@ -270,6 +277,11 @@ impl Db {
         Ok(n)
     }
 
+    /// 全部条目数（统计用，避免全量加载）
+    pub fn count_all(&self) -> Result<i64, DbError> {
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?)
+    }
+
     // ---------- 设置 ----------
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, DbError> {
@@ -299,6 +311,63 @@ impl Db {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_MAX_ITEMS)
+    }
+
+    /// 数据库文件超过阈值时 VACUUM，回收增删产生的碎片空间（启动时调用）
+    pub fn vacuum_if_large(&self, threshold_bytes: u64) -> Result<(), DbError> {
+        let page_size: i64 = self.conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        let page_count: i64 = self.conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let size = (page_count as u64).saturating_mul(page_size as u64);
+        if size > threshold_bytes {
+            self.conn.execute_batch("VACUUM")?;
+            log::info!("db vacuumed (was {size} bytes)");
+        }
+        Ok(())
+    }
+}
+
+/// 启动备份：距上次备份超过 6 小时则复制 db 到 backup/，仅保留最近 5 份
+pub fn backup_database(data_dir: &std::path::Path) {
+    let db_path = data_dir.join("pasteboard.db");
+    if !db_path.exists() {
+        return;
+    }
+    let backup_dir = data_dir.join("backup");
+    if std::fs::create_dir_all(&backup_dir).is_err() {
+        return;
+    }
+    // 距上次备份不足 6 小时则跳过
+    let last = std::fs::read_dir(&backup_dir).ok().and_then(|rd| {
+        rd.filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".db"))
+            .filter_map(|e| e.metadata().ok())
+            .filter_map(|m| m.modified().ok())
+            .max()
+    });
+    if let Some(last) = last {
+        if let Ok(elapsed) = last.elapsed() {
+            if elapsed < std::time::Duration::from_secs(6 * 3600) {
+                return;
+            }
+        }
+    }
+    let dest = backup_dir.join(format!("pasteboard-{}.db", now_ms()));
+    if std::fs::copy(&db_path, &dest).is_ok() {
+        log::info!("db backup saved: {}", dest.display());
+    }
+    // 只保留最近 5 份
+    let mut files: Vec<_> = std::fs::read_dir(&backup_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".db"))
+        .collect();
+    files.sort_by_key(|f| f.file_name());
+    while files.len() > 5 {
+        let old = files.remove(0);
+        let _ = std::fs::remove_file(old.path());
+        log::info!("db backup pruned: {}", old.path().display());
     }
 }
 
