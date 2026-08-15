@@ -116,7 +116,23 @@ npm run tauri build  # 打包（NSIS + MSI + 便携 exe）
 
 ---
 
-## 3. 项目专属注意事项
+## 4. CodeGraph（代码查询首选）
+
+本仓库已启用 CodeGraph（`.codegraph/` 索引，SQLite 知识图谱）。
+
+- **查代码一律先用 CodeGraph**：定位函数/模块、查调用链、找依赖关系、评估改动影响面，都先跑
+  - MCP 工具：`codegraph_explore`（一条调用返回符号源码 + 调用路径 + 影响面）
+  - Shell：`codegraph explore "<符号名或问题>"`（输出相同）
+- **不要用 grep/全文搜索兜底后才查代码**：先 codegraph，查不到或需精确文本再 Grep/Read
+- 索引维护：
+  - 代码有改动后运行 `codegraph sync` 增量更新
+  - 大版本重构后运行 `codegraph index` 全量重建
+  - 状态查看：`codegraph status`
+- 涉及 Rust/Tauri/前端符号的问答，用 codegraph_explore 回答，其中展示的源码视为已 Read，不要重复读文件
+
+---
+
+## 5. 项目专属注意事项
 
 - **端口**：vite 用 3001/3002（本机 Hyper-V 端口排除段 1068-1467，1420 等不可用）
 - **开发实例与安装版冲突**：dev 模式与 release 版同时运行会因单实例机制互相挤掉；切版本前先结束进程（`Stop-Process -Name pasteboard`）
