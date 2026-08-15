@@ -22,6 +22,7 @@
     resetSettings,
     onChange,
     type ItemDto,
+    type ItemKind,
     type SettingsDto,
     type StatsDto,
   } from "../lib/api";
@@ -33,6 +34,7 @@
     Settings,
     Pin,
     PinOff,
+    Star,
     Palette,
     Sliders,
     Keyboard,
@@ -49,6 +51,14 @@
 
   let items: ItemDto[] = $state([]);
   let filter = $state("");
+  let kindFilter = $state<ItemKind | "">("");
+  /** 类型筛选 Tab 配置 */
+  const kindTabs: { k: ItemKind | ""; label: string }[] = [
+    { k: "", label: "全部" },
+    { k: "text", label: "文本" },
+    { k: "image", label: "图片" },
+    { k: "files", label: "文件" },
+  ];
   let selected = $state(-1);
   let loading = $state(true);
   let error = $state("");
@@ -326,7 +336,7 @@
 
   async function reload() {
     loading = true;
-    items = await getHistory(filter, 500, 0);
+    items = await getHistory(filter, kindFilter, 500, 0);
     if (selected >= textItems.length) selected = -1;
     loading = false;
   }
@@ -708,6 +718,23 @@
 
   <!-- 内容区：上方媒体横向区（20%）+ 下方文本列表 -->
   <div class="content">
+    <!-- 类型筛选：全部 / 文本 / 图片 / 文件（与搜索叠加） -->
+    <div class="kind-tabs">
+      {#each kindTabs as tab (tab.k)}
+        <button
+          class="kind-tab {kindFilter === tab.k ? 'active' : ''}"
+          onclick={() => {
+            if (kindFilter !== tab.k) {
+              kindFilter = tab.k;
+              reload();
+            }
+          }}
+        >
+          {tab.label}
+        </button>
+      {/each}
+    </div>
+
     <!-- 上方：图片 / 文件，横向排布 -->
     <section class="strip-section">
       <div class="section-header">
@@ -724,6 +751,7 @@
           {#each topItems as item (item.id)}
             <div
               class="strip-item {item.kind}"
+              class:pinned={item.pinned}
               role="option"
               aria-selected={false}
               aria-label={item.preview}
@@ -810,6 +838,7 @@
             <div
               class="row {item.kind}"
               class:selected={i === selected}
+              class:pinned={item.pinned}
               role="option"
               aria-selected={i === selected}
               tabindex="-1"
@@ -825,6 +854,9 @@
             >
               <div class="meta">
                 <span class="title">
+                  {#if item.pinned}
+                    <Star size={11} fill="currentColor" class="pin-star" />
+                  {/if}
                   {item.preview}
                 </span>
                 <span class="time">{timeLabel(item.created_at)}</span>
@@ -1391,6 +1423,61 @@
   .list::-webkit-scrollbar-thumb {
     background: var(--border);
     border-radius: 3px;
+  }
+
+  /* 类型筛选 Tab */
+  .kind-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 0 12px 6px;
+    flex-shrink: 0;
+  }
+  .kind-tab {
+    border: 1px solid var(--border);
+    background: var(--bg-soft);
+    color: var(--text-dim);
+    border-radius: 999px;
+    padding: 3px 12px;
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  .kind-tab:hover {
+    color: var(--text);
+    border-color: var(--border-strong);
+  }
+  .kind-tab.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-fg);
+    font-weight: 600;
+  }
+
+  /* 固定条目视觉：星标 + 主题色左边条 + 微弱底色 */
+  .pin-star {
+    color: var(--accent);
+    margin-right: 4px;
+    vertical-align: -1px;
+  }
+  .row {
+    position: relative;
+  }
+  .row.pinned {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+  }
+  .row.pinned::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  .strip-item.pinned {
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
 
   .row {

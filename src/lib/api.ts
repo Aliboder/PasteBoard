@@ -27,10 +27,11 @@ export interface SettingsDto {
 
 export async function getHistory(
   filter = "",
+  kind: ItemKind | "" = "",
   limit = 200,
   offset = 0
 ): Promise<ItemDto[]> {
-  return invoke("get_history", { filter, limit, offset });
+  return invoke("get_history", { filter, kind: kind || null, limit, offset });
 }
 
 export async function pinItem(id: number, pinned: boolean): Promise<boolean> {

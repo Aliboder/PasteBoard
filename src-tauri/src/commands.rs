@@ -1,4 +1,4 @@
-//! Tauri 命令层：前端 invoke 的入口，仅做编排
+﻿//! Tauri 命令层：前端 invoke 的入口，仅做编排
 
 use crate::models::{Item, ItemDto};
 use crate::state::AppState;
@@ -24,17 +24,19 @@ impl From<crate::db::DbError> for CommandError {
 
 type CmdResult<T> = Result<T, CommandError>;
 
-/// 历史列表（可搜索、分页）；图片原图文件已缺失的条目自动隐藏（数据库保留）
+/// 历史列表（可搜索、按类型筛选、分页）；图片原图文件已缺失的条目自动隐藏（数据库保留）
 #[tauri::command]
 pub fn get_history(
     state: State<'_, AppState>,
     filter: Option<String>,
+    kind: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> CmdResult<Vec<ItemDto>> {
     let db = state.db.lock().unwrap();
     let mut items = db.list_items(
         filter.as_deref().unwrap_or(""),
+        kind.as_deref(),
         limit.unwrap_or(100),
         offset.unwrap_or(0),
     )?;
@@ -297,7 +299,7 @@ pub fn get_stats(state: State<'_, AppState>) -> CmdResult<StatsDto> {
     let count = |kind: &str| -> i64 {
         db.count_by_kind(kind).unwrap_or(0)
     };
-    let total: i64 = db.list_items("", i64::MAX, 0).map(|v| v.len() as i64).unwrap_or(0);
+    let total: i64 = db.list_items("", None, i64::MAX, 0).map(|v| v.len() as i64).unwrap_or(0);
     let db_path = state.store.root().join("pasteboard.db");
     let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     let media_size = dir_size(&state.store.root().join("images"))

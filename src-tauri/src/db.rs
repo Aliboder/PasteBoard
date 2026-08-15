@@ -1,4 +1,4 @@
-//! SQLite 存储层：条目与设置读写、固定、上限清理
+﻿//! SQLite 存储层：条目与设置读写、固定、上限清理
 
 use crate::models::{Item, ItemKind};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -125,33 +125,39 @@ impl Db {
         Ok(item)
     }
 
-    /// 查询历史；keyword 非空时对文本内容/文件路径做 LIKE 过滤
+    /// 查询历史；keyword 非空时对文本内容/文件路径做 LIKE 过滤；kind 非空时按类型过滤
     pub fn list_items(
         &self,
         keyword: &str,
+        kind: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Item>, DbError> {
-        let mut stmt;
-        let items = if keyword.trim().is_empty() {
-            stmt = self.conn.prepare(
-                "SELECT id, kind, content, file_paths, image_path, thumb_path, hash, pinned, created_at
-                 FROM items ORDER BY pinned DESC, created_at DESC LIMIT ?1 OFFSET ?2",
-            )?;
-            let rows = stmt.query_map(params![limit, offset], |row| row_to_item(row))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        } else {
-            let pattern = format!("%{}%", keyword.trim());
-            stmt = self.conn.prepare(
-                "SELECT id, kind, content, file_paths, image_path, thumb_path, hash, pinned, created_at
-                 FROM items
-                 WHERE content LIKE ?1 OR file_paths LIKE ?1
-                 ORDER BY pinned DESC, created_at DESC LIMIT ?2 OFFSET ?3",
-            )?;
-            let rows = stmt.query_map(params![pattern, limit, offset], |row| row_to_item(row))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        Ok(items)
+        let mut sql = String::from(
+            "SELECT id, kind, content, file_paths, image_path, thumb_path, hash, pinned, created_at
+             FROM items WHERE 1=1",
+        );
+        let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let keyword = keyword.trim();
+        if !keyword.is_empty() {
+            let pattern = format!("%{keyword}%");
+            sql.push_str(" AND (content LIKE ? OR file_paths LIKE ?)");
+            args.push(Box::new(pattern.clone()));
+            args.push(Box::new(pattern));
+        }
+        if let Some(k) = kind {
+            sql.push_str(" AND kind = ?");
+            args.push(Box::new(k.to_string()));
+        }
+        sql.push_str(" ORDER BY pinned DESC, created_at DESC LIMIT ? OFFSET ?");
+        args.push(Box::new(limit));
+        args.push(Box::new(offset));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(args.iter().map(|a| a.as_ref())),
+            |row| row_to_item(row),
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<bool, DbError> {
@@ -216,7 +222,7 @@ impl Db {
     }
 
     pub fn clear_unpinned(&self) -> Result<Vec<Item>, DbError> {
-        let items = self.list_items("", 100000, 0)?;
+        let items = self.list_items("", None, 100000, 0)?;
         let mut removed = Vec::new();
         for it in items {
             if !it.pinned {
@@ -230,7 +236,7 @@ impl Db {
 
     /// 清空全部条目（含固定），返回被删条目供文件清理
     pub fn clear_all(&self) -> Result<Vec<Item>, DbError> {
-        let items = self.list_items("", i64::MAX, 0)?;
+        let items = self.list_items("", None, i64::MAX, 0)?;
         self.conn.execute("DELETE FROM items", [])?;
         Ok(items)
     }
@@ -347,7 +353,7 @@ mod tests {
         db.insert_item(&test_item("dup", false, 1000)).unwrap();
         let second = db.insert_item(&test_item("dup", false, 2000)).unwrap();
         assert!(second.is_none());
-        assert_eq!(db.list_items("", 100, 0).unwrap().len(), 1);
+        assert_eq!(db.list_items("", None, 100, 0).unwrap().len(), 1);
     }
 
     #[test]
@@ -356,7 +362,7 @@ mod tests {
         let a = db.insert_item(&test_item("a", false, 100)).unwrap().unwrap();
         let b = db.insert_item(&test_item("b", false, 200)).unwrap().unwrap();
         db.touch_item(a, 300).unwrap();
-        let list = db.list_items("", 100, 0).unwrap();
+        let list = db.list_items("", None, 100, 0).unwrap();
         assert_eq!(list[0].id, a);
         assert_eq!(list[1].id, b);
     }
@@ -369,7 +375,7 @@ mod tests {
         files_item.kind = ItemKind::Files;
         files_item.file_paths = Some(r#"["C:\\temp\\report.pdf"]"#.to_string());
         db.insert_item(&files_item).unwrap();
-        let list = db.list_items("report", 100, 0).unwrap();
+        let list = db.list_items("report", None, 100, 0).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].kind, ItemKind::Files);
     }
@@ -380,7 +386,7 @@ mod tests {
         let a = db.insert_item(&test_item("a", false, 100)).unwrap().unwrap();
         let b = db.insert_item(&test_item("b", false, 200)).unwrap().unwrap();
         db.set_pinned(b, true).unwrap();
-        let list = db.list_items("", 100, 0).unwrap();
+        let list = db.list_items("", None, 100, 0).unwrap();
         assert_eq!(list[0].id, b);
         assert_eq!(list[1].id, a);
     }
@@ -397,7 +403,7 @@ mod tests {
         assert_eq!(removed.len(), 2);
         let ids: Vec<i64> = removed.iter().map(|i| i.id).collect();
         assert!(ids.contains(&x) && ids.contains(&y));
-        let remaining = db.list_items("", 100, 0).unwrap();
+        let remaining = db.list_items("", None, 100, 0).unwrap();
         assert_eq!(remaining.len(), 2);
         assert_eq!(remaining[0].id, p);
         assert_eq!(remaining[1].id, z);
