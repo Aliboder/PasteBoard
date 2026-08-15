@@ -1,0 +1,36 @@
+/* 共享主题变量（主窗口与设置窗口共用） */
+:root {
+  color: var(--text);
+  --bg: #131418;
+  --bg-grad: #1a1c23;
+  --bg-soft: #1e2129;
+  --bg-hover: #272b36;
+  --border: #2b2f3a;
+  --border-strong: #3d4250;
+  --text: #e9ebf2;
+  --text-dim: #8b91a3;
+  --accent: #4da3ff;
+  --accent-soft: rgba(77, 163, 255, 0.13);
+  --danger: #f07178;
+  --star: #ffcf5c;
+  --shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --radius: 14px;
+  font-family: "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
+    "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+}
+
+:root[data-theme="light"] {
+  --bg: #f2f3f7;
+  --bg-grad: #fafbfd;
+  --bg-soft: #ffffff;
+  --bg-hover: #e7e9ef;
+  --border: #d8dbe3;
+  --border-strong: #c3c7d1;
+  --text: #20242c;
+  --text-dim: #6a7080;
+  --accent: #2f6fd8;
+  --accent-soft: rgba(47, 111, 216, 0.11);
+  --danger: #d64550;
+  --star: #b8860b;
+  --shadow: 0 16px 48px rgba(30, 35, 50, 0.26);
+}

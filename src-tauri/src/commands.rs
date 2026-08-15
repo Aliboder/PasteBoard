@@ -24,7 +24,7 @@ impl From<crate::db::DbError> for CommandError {
 
 type CmdResult<T> = Result<T, CommandError>;
 
-/// 历史列表（可搜索、分页）
+/// 历史列表（可搜索、分页）；图片原图文件已缺失的条目自动隐藏（数据库保留）
 #[tauri::command]
 pub fn get_history(
     state: State<'_, AppState>,
@@ -33,11 +33,20 @@ pub fn get_history(
     offset: Option<i64>,
 ) -> CmdResult<Vec<ItemDto>> {
     let db = state.db.lock().unwrap();
-    let items = db.list_items(
+    let mut items = db.list_items(
         filter.as_deref().unwrap_or(""),
         limit.unwrap_or(100),
         offset.unwrap_or(0),
     )?;
+    // 实时检测：图片原图被手动删除后不再显示（恢复文件后自动重新出现）
+    items.retain(|it| match it.kind {
+        crate::models::ItemKind::Image => it
+            .image_path
+            .as_deref()
+            .map(|p| std::path::Path::new(p).exists())
+            .unwrap_or(false),
+        _ => true,
+    });
     Ok(items.iter().map(|i| to_dto(&state, i)).collect())
 }
 
@@ -72,6 +81,18 @@ pub fn clear_history(state: State<'_, AppState>) -> CmdResult<u32> {
     Ok(n)
 }
 
+/// 清空全部历史（含固定条目）
+#[tauri::command]
+pub fn clear_all_history(state: State<'_, AppState>) -> CmdResult<u32> {
+    let db = state.db.lock().unwrap();
+    let removed = db.clear_all()?;
+    let n = removed.len() as u32;
+    for item in removed {
+        state.store.remove_files(&item);
+    }
+    Ok(n)
+}
+
 /// 粘贴条目到上一窗口（核心动作）
 #[tauri::command]
 pub fn paste_item(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
@@ -82,6 +103,8 @@ pub fn paste_item(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
 pub struct SettingsDto {
     pub max_items: i64,
     pub theme: String,
+    /// 当前全局热键（"hotkey" 设置项）
+    pub hotkey: String,
     /// "on" / "off"：唤起是否跟随鼠标
     pub follow_mouse: String,
     /// "on" / "off"：粘贴后是否保持窗口打开
@@ -114,6 +137,7 @@ pub fn get_settings(
     Ok(SettingsDto {
         max_items: db.max_items(),
         theme: get_setting_str(&db, "theme", "dark"),
+        hotkey: get_setting_str(&db, "hotkey", "Ctrl+Shift+V"),
         follow_mouse: get_setting_str(&db, "follow_mouse", "on"),
         keep_open: get_setting_str(&db, "keep_open", "off"),
         always_on_top: get_setting_str(&db, "always_on_top", "off"),
@@ -215,6 +239,102 @@ pub fn set_window_size(state: State<'_, AppState>, w: f64, h: f64) -> CmdResult<
     let db = state.db.lock().unwrap();
     db.set_setting("win_w", &w.to_string())?;
     db.set_setting("win_h", &h.to_string())?;
+    Ok(())
+}
+
+/// 数据目录路径（设置展示用）
+#[tauri::command]
+pub fn get_data_dir(state: State<'_, AppState>) -> CmdResult<String> {
+    Ok(state.store.root().to_string_lossy().into_owned())
+}
+
+/// 打开数据目录（主动清理入口）
+#[tauri::command]
+pub fn open_data_dir(state: State<'_, AppState>) -> CmdResult<()> {
+    let dir = state.store.root();
+    std::fs::create_dir_all(dir).map_err(|e| CommandError {
+        message: format!("数据目录不可用: {e}"),
+    })?;
+    std::process::Command::new("explorer.exe")
+        .arg(dir)
+        .spawn()
+        .map_err(|e| CommandError {
+            message: format!("无法打开资源管理器: {e}"),
+        })?;
+    Ok(())
+}
+
+/// 数据统计（设置面板展示）
+#[derive(Debug, Serialize)]
+pub struct StatsDto {
+    pub total: i64,
+    pub text: i64,
+    pub image: i64,
+    pub files: i64,
+    pub db_size: u64,
+    pub media_size: u64,
+}
+
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                total += dir_size(&path);
+            } else if let Ok(meta) = std::fs::metadata(&path) {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+/// 数据统计：条目数量与磁盘占用
+#[tauri::command]
+pub fn get_stats(state: State<'_, AppState>) -> CmdResult<StatsDto> {
+    let db = state.db.lock().unwrap();
+    let count = |kind: &str| -> i64 {
+        db.count_by_kind(kind).unwrap_or(0)
+    };
+    let total: i64 = db.list_items("", i64::MAX, 0).map(|v| v.len() as i64).unwrap_or(0);
+    let db_path = state.store.root().join("pasteboard.db");
+    let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+    let media_size = dir_size(&state.store.root().join("images"))
+        + dir_size(&state.store.root().join("thumbs"));
+    Ok(StatsDto {
+        total,
+        text: count("text"),
+        image: count("image"),
+        files: count("files"),
+        db_size,
+        media_size,
+    })
+}
+
+/// 恢复默认设置（含热键重新注册）
+#[tauri::command]
+pub fn reset_settings(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<()> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let db = state.db.lock().unwrap();
+    db.set_setting("max_items", "500")?;
+    db.set_setting("theme", "dark")?;
+    db.set_setting("follow_mouse", "on")?;
+    db.set_setting("keep_open", "off")?;
+    db.set_setting("always_on_top", "off")?;
+    db.set_setting("hotkey", "Ctrl+Shift+V")?;
+    db.set_setting("win_w", "0")?;
+    db.set_setting("win_h", "0")?;
+    drop(db);
+    // 重新注册默认热键并同步窗口状态
+    let _ = app.global_shortcut().unregister_all();
+    let _ = app.global_shortcut().register("Ctrl+Shift+V");
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_always_on_top(false);
+    }
     Ok(())
 }
 

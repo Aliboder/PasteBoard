@@ -228,6 +228,23 @@ impl Db {
         Ok(removed)
     }
 
+    /// 清空全部条目（含固定），返回被删条目供文件清理
+    pub fn clear_all(&self) -> Result<Vec<Item>, DbError> {
+        let items = self.list_items("", i64::MAX, 0)?;
+        self.conn.execute("DELETE FROM items", [])?;
+        Ok(items)
+    }
+
+    /// 按类型计数（统计用）
+    pub fn count_by_kind(&self, kind: &str) -> Result<i64, DbError> {
+        let n = self.conn.query_row(
+            "SELECT COUNT(*) FROM items WHERE kind = ?1",
+            params![kind],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
     // ---------- 设置 ----------
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, DbError> {

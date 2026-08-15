@@ -60,4 +60,4 @@ Rust + Tauri v2 + Svelte(TS) + SQLite(rusqlite) + Windows API（`AddClipboardFor
 
 ## 版本
 
-v0.2.0 · 2026-08-15（界面重设计 + 细节/功能优化批次）
+v0.3.0 · 2026-08-15（设置面板美化、清空历史二级菜单、快捷键按键录制、点击外部关闭、数据统计与恢复默认）

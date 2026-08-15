@@ -25,6 +25,10 @@ impl FileStore {
         self.root.join("thumbs")
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// 原图 PNG 写入 images/{id}.png
     pub fn save_image(&self, id: i64, png_bytes: &[u8]) -> std::io::Result<PathBuf> {
         let path = self.images_dir().join(format!("{id}.png"));

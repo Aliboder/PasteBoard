@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import "../lib/theme.css";
   import {
     getHistory,
     pinItem,
     deleteItem,
     clearHistory,
+    clearAllHistory,
     pasteItem,
     getImage,
     getFilePreview,
@@ -15,19 +17,27 @@
     setToggle,
     setAutostart,
     setWindowSize,
+    openDataDir,
+    getStats,
+    resetSettings,
     onChange,
     type ItemDto,
     type SettingsDto,
+    type StatsDto,
   } from "../lib/api";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import FileTile from "../lib/FileTile.svelte";
   import {
     Search,
     X,
-    Trash2,
     Settings,
     Pin,
     PinOff,
+    Palette,
+    Sliders,
+    Keyboard,
+    History,
+    Wrench,
     Image as ImageIcon,
     ClipboardList,
   } from "lucide-svelte";
@@ -42,12 +52,50 @@
   let selected = $state(-1);
   let loading = $state(true);
   let error = $state("");
-  let showSettings = $state(false);
+  let errorTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 失焦自动隐藏的抑制标志（粘贴流程中焦点切换不应误关窗口） */
+  let suppressBlurHide = false;
+  /** 本次显示后是否曾获得焦点（防止显示失败导致的瞬时误隐藏） */
+  let hasFocusSinceShow = true;
+  /** 失焦后挂起的隐藏定时器（延迟期间识别缩放/移动动作则取消） */
+  let blurHideTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** 取消挂起的失焦隐藏 */
+  function cancelBlurHide() {
+    if (blurHideTimer) {
+      clearTimeout(blurHideTimer);
+      blurHideTimer = null;
+    }
+  }
+
+  /** 提取 invoke 错误信息（兼容字符串与对象），并显示为短暂 toast */
+  function showError(e: unknown) {
+    const msg =
+      typeof e === "string"
+        ? e
+        : (e as { message?: string } | null)?.message ?? "操作失败";
+    error = msg;
+    if (errorTimer) clearTimeout(errorTimer);
+    errorTimer = setTimeout(() => {
+      error = "";
+    }, 3000);
+  }
   let settings = $state<SettingsDto | null>(null);
+  let showSettings = $state(false);
   let maxItemsInput = $state("500");
   let themeSel = $state("dark");
-  let hotkeyInput = $state("Ctrl+Shift+V");
+  let currentHotkey = $state("Ctrl+Shift+V");
+  let hotkeyCapture = $state(false);
+  let hotkeyDraft = $state("");
   let settingsMsg = $state("");
+  let stats = $state<StatsDto | null>(null);
+  let clearMenuOpen = $state(false);
+  let captureBoxEl: HTMLElement | undefined = $state();
+
+  /** 进入录制模式时聚焦录制框 */
+  $effect(() => {
+    if (hotkeyCapture) captureBoxEl?.focus();
+  });
   let hoverPreview = $state<{ src: string; top: number; height: number } | null>(null);
   let textPreview = $state<{ text: string; top: number; height: number } | null>(null);
   const previewCache = new Map<number, string>();
@@ -69,7 +117,7 @@
       );
       if (mediaHandler && mediaDark) mediaDark.removeEventListener("change", mediaHandler);
       mediaHandler = () => {
-        if (themeSel === "system" && mediaDark) {
+        if (settings?.theme === "system" && mediaDark) {
           document.documentElement.setAttribute(
             "data-theme",
             mediaDark.matches ? "dark" : "light"
@@ -124,11 +172,16 @@
   }
 
   async function openSettings() {
-    showSettings = true;
+    showSettings = !showSettings;
     settingsMsg = "";
-    settings = await getSettings();
-    maxItemsInput = String(settings.max_items);
-    themeSel = settings.theme;
+    hotkeyCapture = false;
+    if (showSettings) {
+      settings = await getSettings();
+      maxItemsInput = String(settings.max_items);
+      themeSel = settings.theme;
+      currentHotkey = settings.hotkey;
+      stats = await getStats();
+    }
   }
 
   async function saveSettings() {
@@ -143,14 +196,65 @@
     settingsMsg = "已保存";
   }
 
-  async function saveHotkey() {
+  /** 应用新热键（录制后自动调用） */
+  async function applyHotkey(combo: string) {
     settingsMsg = "";
     try {
-      await setHotkey(hotkeyInput.trim());
-      settingsMsg = `热键已生效：${hotkeyInput.trim()}`;
+      await setHotkey(combo);
+      currentHotkey = combo;
+      hotkeyCapture = false;
+      settingsMsg = `热键已生效：${combo}`;
     } catch (e) {
-      settingsMsg = String(e);
+      settingsMsg = typeof e === "string" ? e : (e as { message?: string })?.message ?? "快捷键设置失败";
     }
+  }
+
+  /** 把 e.code 映射为可识别的键名（不支持的键返回 null） */
+  function mapKey(code: string): string | null {
+    if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+    if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+    if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return code;
+    const map: Record<string, string> = {
+      Space: "Space",
+      Enter: "Enter",
+      Tab: "Tab",
+      Backspace: "Backspace",
+      Delete: "Delete",
+      Home: "Home",
+      End: "End",
+      PageUp: "PageUp",
+      PageDown: "PageDown",
+      Insert: "Insert",
+      ArrowUp: "Up",
+      ArrowDown: "Down",
+      ArrowLeft: "Left",
+      ArrowRight: "Right",
+    };
+    return map[code] ?? null;
+  }
+
+  /** 按键录制：捕获组合键并自动应用 */
+  function onHotkeyKeydown(e: KeyboardEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      hotkeyCapture = false;
+      return;
+    }
+    if (e.repeat) return;
+    const mods: string[] = [];
+    if (e.ctrlKey) mods.push("Ctrl");
+    if (e.altKey) mods.push("Alt");
+    if (e.shiftKey) mods.push("Shift");
+    if (e.metaKey) mods.push("Super");
+    const key = mapKey(e.code);
+    if (!key) return; // 忽略不可映射键
+    if (mods.length === 0) {
+      settingsMsg = "快捷键需至少包含一个修饰键（Ctrl / Alt / Shift / Win）";
+      return;
+    }
+    hotkeyDraft = [...mods, key].join("+");
+    applyHotkey(hotkeyDraft);
   }
 
   async function toggleSetting(key: string, enabled: boolean) {
@@ -172,6 +276,47 @@
       settingsMsg = enabled ? "已开启开机自启" : "已关闭开机自启";
     } catch (e) {
       settingsMsg = String(e);
+    }
+  }
+
+  async function openDataDirectory() {
+    settingsMsg = "";
+    try {
+      await openDataDir();
+    } catch (e) {
+      settingsMsg = String(e);
+    }
+  }
+
+  function fmtSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  }
+
+  async function refreshStats() {
+    stats = await getStats();
+  }
+
+  async function doReset() {
+    settingsMsg = "";
+    try {
+      await resetSettings();
+      await refreshSettings();
+      await openSettings();
+      settingsMsg = "已恢复默认设置";
+    } catch (e) {
+      settingsMsg = String(e);
+    }
+  }
+
+  /** 刷新设置并应用主题（聚焦时调用） */
+  async function refreshSettings() {
+    try {
+      settings = await getSettings();
+      if (settings) applyTheme(settings.theme);
+    } catch {
+      /* ignore */
     }
   }
 
@@ -202,19 +347,36 @@
     await reload();
   }
 
-  async function clearAll() {
-    await clearHistory();
+  /** 清空历史（设置面板二级菜单） */
+  async function clearUnpinned() {
+    clearMenuOpen = false;
+    const n = await clearHistory();
     await reload();
+    await refreshStats();
+    settingsMsg = `已清空 ${n} 条非固定历史`;
+  }
+
+  async function clearAllItems() {
+    clearMenuOpen = false;
+    const n = await clearAllHistory();
+    await reload();
+    await refreshStats();
+    settingsMsg = `已清空全部 ${n} 条历史`;
   }
 
   async function paste(id: number) {
     error = "";
+    // 粘贴会切焦点到目标窗口，期间抑制失焦隐藏（配合"粘贴后保持打开"）
+    suppressBlurHide = true;
+    setTimeout(() => {
+      suppressBlurHide = false;
+    }, 600);
     try {
       await pasteItem(id);
       const keepOpen = settings?.keep_open === "on";
       if (!keepOpen) await getCurrentWindow().hide();
     } catch (e) {
-      error = String(e);
+      showError(e);
     }
   }
 
@@ -291,6 +453,8 @@
 
   /** 全局键盘：↑↓ 选择、Enter 粘贴、Esc 关闭、数字 1~9 快捷粘贴、Delete 删除（作用于文本区） */
   function globalKeydown(e: KeyboardEvent) {
+    // 快捷键录制期间由录制框独占键盘
+    if (hotkeyCapture) return;
     const inInput = document.activeElement?.tagName === "INPUT";
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -314,20 +478,39 @@
   onMount(() => {
     reload();
     // 应用已保存的主题与窗口尺寸
-    getSettings()
-      .then(async (s) => {
-        settings = s;
-        themeSel = s.theme;
-        applyTheme(s.theme);
-        if (s.win_w > 0 && s.win_h > 0) {
-          await getCurrentWindow().setSize(new LogicalSize(s.win_w, s.win_h));
+    refreshSettings()
+      .then(async () => {
+        if (settings && settings.win_w > 0 && settings.win_h > 0) {
+          await getCurrentWindow().setSize(new LogicalSize(settings.win_w, settings.win_h));
         }
       })
       .catch(() => applyTheme("dark"));
     watchResize();
+    // 失焦行为：点击窗口外部 → 延迟 250ms 隐藏（期间若发生缩放/移动/重新聚焦则取消）；
+    // 重新聚焦 → 刷新列表与设置
+    getCurrentWindow().onFocusChanged(({ payload }) => {
+      if (payload) {
+        hasFocusSinceShow = true;
+        cancelBlurHide();
+        reload();
+        refreshSettings();
+      } else if (hasFocusSinceShow && !suppressBlurHide) {
+        if (!blurHideTimer) {
+          blurHideTimer = setTimeout(() => {
+            blurHideTimer = null;
+            getCurrentWindow().hide();
+          }, 250);
+        }
+      }
+    });
+    // 缩放/移动进行中 → 取消挂起的隐藏（用户在拖边缘/标题栏，不是点击外部）
+    getCurrentWindow().onResized(() => cancelBlurHide());
+    getCurrentWindow().onMoved(() => cancelBlurHide());
     let cleanup: (() => void) | null = null;
     onChange(() => reload()).then((un) => (cleanup = un));
-    return () => cleanup?.();
+    return () => {
+      cleanup?.();
+    };
   });
 </script>
 
@@ -354,9 +537,6 @@
         </button>
       {/if}
     </div>
-    <button class="icon-btn clear-btn" title="清空历史" onclick={clearAll}>
-      <Trash2 size={14} />
-    </button>
     <button
       class="icon-btn {showSettings ? 'active' : ''}"
       title="设置"
@@ -368,10 +548,107 @@
 
   {#if showSettings}
     <section class="settings-panel">
-      <div class="settings-row">
-        <label>
-          历史上限
+      <!-- 外观 -->
+      <div class="sp-section">
+        <div class="sp-title">
+          <Palette size={12} />
+          外观
+        </div>
+        <div class="sp-row">
+          <span class="sp-label">主题</span>
+          <select bind:value={themeSel}>
+            <option value="dark">深色</option>
+            <option value="light">浅色</option>
+            <option value="system">跟随系统</option>
+          </select>
+          <button class="btn small primary" onclick={saveSettings}>保存</button>
+        </div>
+      </div>
+
+      <!-- 行为 -->
+      <div class="sp-section">
+        <div class="sp-title">
+          <Sliders size={12} />
+          行为
+        </div>
+        <label class="switch-row">
+          <span>唤起跟随鼠标</span>
           <input
+            type="checkbox"
+            checked={settings?.follow_mouse === "on"}
+            onchange={(e) => toggleSetting("follow_mouse", (e.currentTarget as HTMLInputElement).checked)}
+          />
+          <span class="switch"></span>
+        </label>
+        <label class="switch-row">
+          <span>粘贴后保持打开</span>
+          <input
+            type="checkbox"
+            checked={settings?.keep_open === "on"}
+            onchange={(e) => toggleSetting("keep_open", (e.currentTarget as HTMLInputElement).checked)}
+          />
+          <span class="switch"></span>
+        </label>
+        <label class="switch-row">
+          <span>主窗口置顶</span>
+          <input
+            type="checkbox"
+            checked={settings?.always_on_top === "on"}
+            onchange={(e) => toggleSetting("always_on_top", (e.currentTarget as HTMLInputElement).checked)}
+          />
+          <span class="switch"></span>
+        </label>
+        <label class="switch-row">
+          <span>开机自启</span>
+          <input
+            type="checkbox"
+            checked={settings?.autostart ?? false}
+            onchange={(e) => toggleAutostart((e.currentTarget as HTMLInputElement).checked)}
+          />
+          <span class="switch"></span>
+        </label>
+      </div>
+
+      <!-- 快捷键 -->
+      <div class="sp-section">
+        <div class="sp-title">
+          <Keyboard size={12} />
+          全局快捷键
+        </div>
+        {#if !hotkeyCapture}
+          <div class="sp-row">
+            <kbd class="hotkey-chip">{currentHotkey}</kbd>
+            <button class="btn small" onclick={() => (hotkeyCapture = true)}>修改</button>
+            <span class="sp-msg">{settingsMsg}</span>
+          </div>
+        {:else}
+          <div
+            class="capture-box"
+            role="button"
+            tabindex="0"
+            bind:this={captureBoxEl}
+            onkeydown={onHotkeyKeydown}
+            onblur={() => {
+              if (hotkeyCapture) hotkeyCapture = false;
+            }}
+          >
+            <span class="capture-hint">请按下新的快捷键组合（需含 Ctrl/Alt/Shift/Win，Esc 取消）</span>
+            <strong class="capture-value">{hotkeyDraft || "…"}</strong>
+            <span class="capture-msg">{settingsMsg}</span>
+          </div>
+        {/if}
+      </div>
+
+      <!-- 历史 -->
+      <div class="sp-section">
+        <div class="sp-title">
+          <History size={12} />
+          历史
+        </div>
+        <div class="sp-row">
+          <span class="sp-label">上限</span>
+          <input
+            class="num-input"
             type="number"
             min="1"
             max="100000"
@@ -379,74 +656,52 @@
             onkeydown={(e) => {
               if (e.key === "Enter") saveSettings();
             }}
-          />条
-        </label>
-        <label>
-          主题
-          <select bind:value={themeSel}>
-            <option value="dark">深色</option>
-            <option value="light">浅色</option>
-            <option value="system">跟随系统</option>
-          </select>
-        </label>
-        <button class="save-btn" onclick={saveSettings}>保存</button>
+          />
+          <span class="sp-unit">条</span>
+          <button class="btn small primary" onclick={saveSettings}>保存</button>
+        </div>
+        {#if stats}
+          <p class="sp-stats">
+            共 {stats.total} 条（文本 {stats.text} · 图片 {stats.image} · 文件 {stats.files}）
+            <br />
+            数据库 {fmtSize(stats.db_size)} · 图片文件 {fmtSize(stats.media_size)}
+          </p>
+        {/if}
+        <div class="menu-wrap">
+          <button class="btn small danger" onclick={() => (clearMenuOpen = !clearMenuOpen)}>
+            清空历史
+            <span class="caret">▾</span>
+          </button>
+          {#if clearMenuOpen}
+            <div
+              class="menu-backdrop"
+              role="presentation"
+              onclick={() => (clearMenuOpen = false)}
+              onkeydown={() => {}}
+            ></div>
+            <div class="menu">
+              <button onclick={clearUnpinned}>清空非固定历史（保留固定）</button>
+              <button class="danger" onclick={clearAllItems}>清空全部历史（含固定）</button>
+            </div>
+          {/if}
+        </div>
       </div>
 
-      <div class="settings-row">
-        <label class="toggle">
-          <input
-            type="checkbox"
-            checked={settings?.follow_mouse === "on"}
-            onchange={(e) => toggleSetting("follow_mouse", (e.currentTarget as HTMLInputElement).checked)}
-          />
-          唤起跟随鼠标
-        </label>
-        <label class="toggle">
-          <input
-            type="checkbox"
-            checked={settings?.keep_open === "on"}
-            onchange={(e) => toggleSetting("keep_open", (e.currentTarget as HTMLInputElement).checked)}
-          />
-          粘贴后保持打开
-        </label>
-        <label class="toggle">
-          <input
-            type="checkbox"
-            checked={settings?.always_on_top === "on"}
-            onchange={(e) => toggleSetting("always_on_top", (e.currentTarget as HTMLInputElement).checked)}
-          />
-          窗口置顶
-        </label>
-        <label class="toggle">
-          <input
-            type="checkbox"
-            checked={settings?.autostart ?? false}
-            onchange={(e) => toggleAutostart((e.currentTarget as HTMLInputElement).checked)}
-          />
-          开机自启
-        </label>
+      <!-- 数据与维护 -->
+      <div class="sp-section">
+        <div class="sp-title">
+          <Wrench size={12} />
+          数据与维护
+        </div>
+        <div class="sp-row">
+          <button class="btn small" onclick={openDataDirectory}>打开数据目录</button>
+          <button class="btn small danger" onclick={doReset}>恢复默认设置</button>
+        </div>
       </div>
 
-      <div class="settings-row">
-        <label>
-          全局快捷键
-          <input
-            class="hotkey-input"
-            placeholder="如 Ctrl+Shift+V"
-            bind:value={hotkeyInput}
-            onkeydown={(e) => {
-              if (e.key === "Enter") saveHotkey();
-            }}
-          />
-        </label>
-        <button class="save-btn" onclick={saveHotkey}>应用</button>
-        <span class="settings-msg">{settingsMsg}</span>
-      </div>
-
-      <p class="settings-hint">
-        快捷键格式参考：<code>Ctrl+Shift+V</code>、<code>Alt+Q</code>、<code>CmdOrCtrl+Shift+C</code><br />
-        窗口可拖动边缘调整大小，尺寸会自动记忆<br />
-        数据目录：<code>%APPDATA%\com.aliboder.pasteboard</code>
+      <p class="sp-hint">
+        快捷键格式：<code>Ctrl+Shift+V</code>、<code>Alt+Q</code> 等<br />
+        数据目录：<code>%APPDATA%\com.aliboder.pasteboard</code>（删除图片文件后条目自动隐藏）
       </p>
     </section>
   {/if}
@@ -470,6 +725,7 @@
             <div
               class="strip-item {item.kind}"
               role="option"
+              aria-selected={false}
               aria-label={item.preview}
               tabindex="-1"
               title={item.kind === "image"
@@ -543,9 +799,7 @@
         <span class="section-count">{textItems.length} 条</span>
       </div>
       <main class="list">
-        {#if error}
-          <p class="empty error-msg">{error}</p>
-        {:else if loading}
+        {#if loading}
           <p class="empty">加载中…</p>
         {:else if textItems.length === 0}
           <p class="empty">
@@ -618,6 +872,11 @@
     </section>
   </div>
 
+  <!-- 错误提示 toast（不遮挡列表，3 秒自动消失） -->
+  {#if error}
+    <div class="toast">{error}</div>
+  {/if}
+
   <!-- 底部提示（也可拖动窗口） -->
   <footer class="footer" data-tauri-drag-region="deep">
     <span>↑↓ 选择</span>
@@ -629,42 +888,6 @@
 </div>
 
 <style>
-  :global(:root) {
-    color: var(--text);
-    --bg: #131418;
-    --bg-grad: #1a1c23;
-    --bg-soft: #1e2129;
-    --bg-hover: #272b36;
-    --border: #2b2f3a;
-    --border-strong: #3d4250;
-    --text: #e9ebf2;
-    --text-dim: #8b91a3;
-    --accent: #4da3ff;
-    --accent-soft: rgba(77, 163, 255, 0.13);
-    --danger: #f07178;
-    --star: #ffcf5c;
-    --shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
-    --radius: 14px;
-    font-family: "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
-      "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  }
-
-  :global(:root[data-theme="light"]) {
-    --bg: #f2f3f7;
-    --bg-grad: #fafbfd;
-    --bg-soft: #ffffff;
-    --bg-hover: #e7e9ef;
-    --border: #d8dbe3;
-    --border-strong: #c3c7d1;
-    --text: #20242c;
-    --text-dim: #6a7080;
-    --accent: #2f6fd8;
-    --accent-soft: rgba(47, 111, 216, 0.11);
-    --danger: #d64550;
-    --star: #b8860b;
-    --shadow: 0 16px 48px rgba(30, 35, 50, 0.26);
-  }
-
   :global(html),
   :global(body) {
     margin: 0;
@@ -686,6 +909,7 @@
   }
 
   .window {
+    position: relative;
     display: flex;
     flex-direction: column;
     height: 100vh;
@@ -763,94 +987,251 @@
     background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
 
-  /* 设置面板 */
+  /* 设置面板（内联，分区排版） */
   .settings-panel {
     margin: 0 10px 8px;
-    padding: 12px;
+    padding: 12px 14px;
     background: var(--bg-soft);
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: 12px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 4px;
     font-size: 12px;
-    color: var(--text-dim);
+    max-height: 62%;
+    overflow-y: auto;
   }
-  .settings-row {
+  .sp-section {
+    padding: 8px 0;
+  }
+  .sp-section + .sp-section {
+    border-top: 1px solid var(--border);
+  }
+  .sp-title {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .sp-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     flex-wrap: wrap;
   }
-  .settings-panel label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .settings-panel label.toggle {
-    cursor: pointer;
-    user-select: none;
+  .sp-label {
     color: var(--text);
+    min-width: 40px;
   }
-  .settings-panel input[type="checkbox"] {
-    accent-color: var(--accent);
-    cursor: pointer;
+  .sp-unit {
+    color: var(--text-dim);
   }
-  .settings-panel input[type="number"],
-  .settings-panel input.hotkey-input {
-    width: 80px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    padding: 4px 8px;
-    font-size: 12px;
-    outline: none;
+  .sp-stats {
+    margin: 8px 0;
+    color: var(--text-dim);
+    font-size: 11.5px;
+    line-height: 1.7;
   }
-  .settings-panel input.hotkey-input {
-    width: 140px;
-    font-family: Consolas, monospace;
-  }
-  .settings-panel input[type="number"]:focus,
-  .settings-panel input.hotkey-input:focus {
-    border-color: var(--accent);
-  }
-  .settings-panel select {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    padding: 3px 6px;
-    font-size: 12px;
-    outline: none;
-  }
-  .hotkey-row {
-    margin-left: auto;
-  }
-  .settings-panel .settings-msg {
+  .sp-msg {
     color: var(--accent);
     margin-left: auto;
   }
-  .save-btn {
-    border: none;
-    background: var(--accent);
-    color: #10121a;
-    font-size: 12px;
-    font-weight: 600;
-    padding: 5px 14px;
-    border-radius: 6px;
-    cursor: pointer;
-  }
-  .settings-hint {
-    flex-basis: 100%;
-    margin: 4px 0 0;
+  .sp-hint {
+    margin: 2px 0 0;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 11px;
     line-height: 1.7;
   }
-  .settings-hint code {
+  .sp-hint code {
     background: var(--bg);
     padding: 1px 5px;
     border-radius: 4px;
+    font-size: 10.5px;
+  }
+
+  .settings-panel select,
+  .settings-panel input[type="number"] {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text);
+    padding: 5px 9px;
+    font-size: 12px;
+    outline: none;
+    font-family: inherit;
+  }
+  .settings-panel select:focus,
+  .settings-panel input[type="number"]:focus {
+    border-color: var(--accent);
+  }
+  .num-input {
+    width: 64px;
+  }
+
+  /* 快捷键显示与录制 */
+  .hotkey-chip {
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-family: Consolas, monospace;
+    font-size: 12px;
+    color: var(--accent);
+  }
+  .capture-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--bg);
+    border: 1px dashed var(--accent);
+    border-radius: 8px;
+    padding: 10px 12px;
+    outline: none;
+  }
+  .capture-box:focus {
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .capture-hint {
+    color: var(--text-dim);
     font-size: 11px;
+  }
+  .capture-value {
+    font-family: Consolas, monospace;
+    font-size: 15px;
+    color: var(--accent);
+  }
+  .capture-msg {
+    color: var(--danger);
+    font-size: 11px;
+  }
+
+  /* 按钮 */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 11.5px;
+    padding: 4px 11px;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+    font-family: inherit;
+  }
+  .btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-strong);
+  }
+  .btn.primary {
+    background: var(--accent);
+    border-color: transparent;
+    color: #10121a;
+    font-weight: 600;
+  }
+  .btn.primary:hover {
+    filter: brightness(1.08);
+  }
+  .btn.danger {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  }
+  .btn.danger:hover {
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+  }
+
+  /* 开关（自定义 switch） */
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 0;
+    color: var(--text);
+    cursor: pointer;
+    user-select: none;
+  }
+  .switch-row input {
+    display: none;
+  }
+  .switch {
+    width: 34px;
+    height: 18px;
+    border-radius: 99px;
+    background: var(--border-strong);
+    position: relative;
+    flex-shrink: 0;
+    transition: background 0.15s;
+  }
+  .switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #ffffff;
+    transition: transform 0.15s;
+  }
+  .switch-row input:checked + .switch {
+    background: var(--accent);
+  }
+  .switch-row input:checked + .switch::after {
+    transform: translateX(16px);
+  }
+
+  /* 清空历史二级菜单 */
+  .menu-wrap {
+    position: relative;
+    margin-top: 4px;
+  }
+  .caret {
+    font-size: 10px;
+    opacity: 0.8;
+  }
+  .menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+  }
+  .menu {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 4px);
+    z-index: 41;
+    background: var(--bg-soft);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    min-width: 200px;
+    padding: 4px;
+  }
+  .menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .menu button:hover {
+    background: var(--bg-hover);
+  }
+  .menu button.danger {
+    color: var(--danger);
   }
 
   /* 内容区：上横向区 + 下文本区 */
@@ -1062,10 +1443,10 @@
     color: var(--text);
     font-size: 13px;
     line-height: 1.5;
-    /* 固定 3 行高度，保证条目整齐；超出折叠省略 */
-    height: 58.5px;
+    /* 超过 3 行折叠省略；不足 3 行按实际行数渲染（自适应高度） */
     display: -webkit-box;
     -webkit-line-clamp: 3;
+    line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
     word-break: break-word;
@@ -1165,5 +1546,27 @@
   .footer .dot {
     margin-left: auto;
     opacity: 0.5;
+  }
+
+  /* 错误提示 toast */
+  .toast {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: 40px;
+    max-width: 85%;
+    background: var(--bg-soft);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    padding: 7px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    box-shadow: var(--shadow);
+    z-index: 30;
+    pointer-events: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    animation: window-in 120ms ease-out;
   }
 </style>

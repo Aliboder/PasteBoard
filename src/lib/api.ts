@@ -16,6 +16,7 @@ export interface ItemDto {
 export interface SettingsDto {
   max_items: number;
   theme: string;
+  hotkey: string;
   follow_mouse: string;
   keep_open: string;
   always_on_top: string;
@@ -42,6 +43,10 @@ export async function deleteItem(id: number): Promise<boolean> {
 
 export async function clearHistory(): Promise<number> {
   return invoke("clear_history");
+}
+
+export async function clearAllHistory(): Promise<number> {
+  return invoke("clear_all_history");
 }
 
 export async function pasteItem(id: number): Promise<void> {
@@ -86,6 +91,27 @@ export async function setAutostart(enabled: boolean): Promise<void> {
 
 export async function setWindowSize(w: number, h: number): Promise<void> {
   return invoke("set_window_size", { w, h });
+}
+
+export async function openDataDir(): Promise<void> {
+  return invoke("open_data_dir");
+}
+
+export interface StatsDto {
+  total: number;
+  text: number;
+  image: number;
+  files: number;
+  db_size: number;
+  media_size: number;
+}
+
+export async function getStats(): Promise<StatsDto> {
+  return invoke("get_stats");
+}
+
+export async function resetSettings(): Promise<void> {
+  return invoke("reset_settings");
 }
 
 export async function setHotkey(hotkey: string): Promise<void> {
