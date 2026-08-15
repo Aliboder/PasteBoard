@@ -6,8 +6,11 @@
     deleteItem,
     clearHistory,
     pasteItem,
+    getSettings,
+    setMaxItems,
     onChange,
     type ItemDto,
+    type SettingsDto,
   } from "../lib/api";
   import { getCurrentWindow } from "@tauri-apps/api/window";
 
@@ -16,6 +19,27 @@
   let selected = $state(-1);
   let loading = $state(true);
   let error = $state("");
+  let showSettings = $state(false);
+  let settings = $state<SettingsDto | null>(null);
+  let maxItemsInput = $state("500");
+  let settingsMsg = $state("");
+
+  async function openSettings() {
+    showSettings = true;
+    settingsMsg = "";
+    settings = await getSettings();
+    maxItemsInput = String(settings.max_items);
+  }
+
+  async function saveSettings() {
+    const n = parseInt(maxItemsInput, 10);
+    if (isNaN(n) || n < 1) {
+      settingsMsg = "请输入大于 0 的数字";
+      return;
+    }
+    await setMaxItems(n);
+    settingsMsg = "已保存";
+  }
 
   async function reload() {
     loading = true;
@@ -109,7 +133,35 @@
       {/if}
     </div>
     <button class="icon-btn clear-btn" title="清空历史" onclick={clearAll}>🗑</button>
+    <button
+      class="icon-btn {showSettings ? 'active' : ''}"
+      title="设置"
+      onclick={() => (showSettings ? (showSettings = false) : openSettings())}
+    >⚙</button>
   </header>
+
+  {#if showSettings}
+    <section class="settings-panel">
+      <label>
+        历史上限（条）
+        <input
+          type="number"
+          min="1"
+          max="100000"
+          bind:value={maxItemsInput}
+          onkeydown={(e) => {
+            if (e.key === "Enter") saveSettings();
+          }}
+        />
+      </label>
+      <button class="save-btn" onclick={saveSettings}>保存</button>
+      <span class="settings-msg">{settingsMsg}</span>
+      <p class="settings-hint">
+        全局快捷键：<code>Ctrl+Shift+V</code>（暂不可自定义）<br />
+        数据目录：<code>%APPDATA%\com.aliboder.pasteboard</code>
+      </p>
+    </section>
+  {/if}
 
   <!-- 列表 -->
   <main class="list" onkeydown={onKeydown} tabindex="-1" role="listbox" aria-label="剪贴板历史">
@@ -276,6 +328,63 @@
   }
   .icon-btn.danger:hover {
     color: var(--danger);
+  }
+
+  /* 设置面板 */
+  .settings-panel {
+    margin: 0 10px 8px;
+    padding: 12px;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .settings-panel label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .settings-panel input[type="number"] {
+    width: 80px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 4px 8px;
+    font-size: 12px;
+    outline: none;
+  }
+  .settings-panel input[type="number"]:focus {
+    border-color: var(--accent);
+  }
+  .save-btn {
+    border: none;
+    background: var(--accent);
+    color: #10121a;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .settings-msg {
+    color: var(--accent);
+  }
+  .settings-hint {
+    flex-basis: 100%;
+    margin: 4px 0 0;
+    line-height: 1.7;
+  }
+  .settings-hint code {
+    background: var(--bg);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 11px;
   }
 
   /* 列表 */

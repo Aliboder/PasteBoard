@@ -16,22 +16,65 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
-/// 极简日志器：输出到 stderr（tauri dev 会捕获）
-struct SimpleLogger;
+/// 极简日志器：输出到 stderr（tauri dev 会捕获）+ 日志文件（%APPDATA%/com.aliboder.pasteboard/pasteboard.log）
+struct SimpleLogger {
+    file: std::sync::Mutex<std::fs::File>,
+}
+
+static LOGGER: std::sync::OnceLock<SimpleLogger> = std::sync::OnceLock::new();
 
 impl log::Log for SimpleLogger {
     fn enabled(&self, _metadata: &log::Metadata) -> bool {
         true
     }
     fn log(&self, record: &log::Record) {
-        eprintln!("[PasteBoard][{}] {}", record.level(), record.args());
+        let line = format!(
+            "[{}] {}: {}",
+            record.level(),
+            record
+                .module_path()
+                .unwrap_or("pasteboard"),
+            record.args()
+        );
+        eprintln!("{line}");
+        if let Ok(mut file) = self.file.lock() {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+        }
     }
     fn flush(&self) {}
 }
 
 fn init_logger() {
-    let _ = log::set_logger(&SimpleLogger);
-    log::set_max_level(log::LevelFilter::Info);
+    // panic 也写入日志文件
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("[PasteBoard][PANIC] {info}");
+    }));
+
+    let default_path = format!(
+        "{}/com.aliboder.pasteboard/pasteboard.log",
+        std::env::var("APPDATA").unwrap_or_else(|_| ".".into())
+    );
+    let path = std::path::PathBuf::from(&default_path);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path);
+    match file {
+        Ok(file) => {
+            if LOGGER.set(SimpleLogger { file: std::sync::Mutex::new(file) }).is_ok() {
+                let _ = log::set_logger(LOGGER.get().unwrap());
+                log::set_max_level(log::LevelFilter::Info);
+                log::info!("pasteboard started, log file: {}", path.display());
+            }
+        }
+        Err(e) => {
+            eprintln!("[PasteBoard] failed to open log file {}: {e}", path.display());
+        }
+    }
 }
 
 /// 切换主窗口显示/隐藏

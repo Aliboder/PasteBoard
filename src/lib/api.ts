@@ -45,6 +45,10 @@ export async function getSettings(): Promise<SettingsDto> {
   return invoke("get_settings");
 }
 
+export async function setMaxItems(maxItems: number): Promise<void> {
+  return invoke("set_max_items", { maxItems });
+}
+
 /** 订阅剪贴板变化事件（新条目 / 上限清理），返回取消订阅函数 */
 export async function onChange(cb: () => void): Promise<UnlistenFn> {
   const unlisteners = await Promise.all([
