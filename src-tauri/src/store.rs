@@ -113,6 +113,7 @@ mod tests {
             id: 7,
             kind: crate::models::ItemKind::Image,
             content: None,
+            html: None,
             file_paths: None,
             image_path: Some(ip.to_string_lossy().into_owned()),
             thumb_path: Some(tp.to_string_lossy().into_owned()),

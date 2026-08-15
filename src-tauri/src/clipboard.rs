@@ -13,6 +13,11 @@ use windows::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
 /// 串行化本应用内所有剪贴板访问（OpenClipboard 同时只能有一个持有者）
 static CLIP_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 注册的 "HTML Format" 剪贴板格式编号（每次运行需重新注册）
+fn html_format() -> u32 {
+    unsafe { windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!("HTML Format")) }
+}
+
 fn open_clipboard() -> bool {
     unsafe { OpenClipboard(None).is_ok() }
 }
@@ -50,6 +55,35 @@ pub fn read_text() -> Option<String> {
             } else {
                 Some(trimmed)
             }
+        }
+    })();
+    close_clipboard();
+    result
+}
+
+/// 当前剪贴板 HTML（若存在 "HTML Format" 注册格式），保留原始头部
+pub fn read_html() -> Option<String> {
+    let _guard = CLIP_MUTEX.lock().ok()?;
+    if !open_clipboard() {
+        return None;
+    }
+    let result = (|| {
+        let fmt = html_format();
+        if fmt == 0 || !unsafe { IsClipboardFormatAvailable(fmt) }.is_ok() {
+            return None;
+        }
+        unsafe {
+            let h = HGLOBAL(GetClipboardData(fmt).ok()?.0);
+            let ptr = GlobalLock(h) as *const u8;
+            if ptr.is_null() {
+                return None;
+            }
+            let size = GlobalSize(h);
+            let slice = std::slice::from_raw_parts(ptr, size as usize);
+            let s = String::from_utf8_lossy(slice);
+            let _ = GlobalUnlock(h);
+            let s = s.trim_end_matches('\0').to_string();
+            if s.is_empty() { None } else { Some(s) }
         }
     })();
     close_clipboard();
@@ -220,8 +254,44 @@ pub fn rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Stri
     Ok(buf)
 }
 
-/// 写入文本到剪贴板（成功返回 true）
-pub fn write_text(text: &str) -> bool {
+/// 从 CF_HTML 原始内容中提取 fragment 区间（StartFragment/EndFragment 之间的片段）
+fn extract_fragment(cf_html: &str) -> &str {
+    let read_offsets = |name: &str| -> Option<usize> {
+        let idx = cf_html.find(name)?;
+        let digits: String = cf_html[idx + name.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().ok()
+    };
+    match (read_offsets("StartFragment:"), read_offsets("EndFragment:")) {
+        (Some(s), Some(e)) if s < e && e <= cf_html.len() => &cf_html[s..e],
+        _ => cf_html,
+    }
+}
+
+/// 用 fragment 重建标准 CF_HTML 载荷（UTF-8 编码，头部偏移重算）
+fn build_cf_html(fragment: &str) -> Vec<u8> {
+    let html = format!(
+        "<html>\r\n<body>\r\n<!--StartFragment-->{fragment}<!--EndFragment-->\r\n</body>\r\n</html>"
+    );
+    let header_prefix = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n";
+    let frag_start = header_prefix.len() + html.find("<!--StartFragment-->").unwrap_or(0)
+        + "<!--StartFragment-->".len();
+    let frag_end = frag_start + fragment.len();
+    let end_html = header_prefix.len() + html.len();
+    let header = format!(
+        "Version:0.9\r\nStartHTML:{:010}\r\nEndHTML:{:010}\r\nStartFragment:{:010}\r\nEndFragment:{:010}\r\n",
+        header_prefix.len(),
+        end_html,
+        frag_start,
+        frag_end
+    );
+    format!("{header}{html}").into_bytes()
+}
+
+/// 写入文本（含可选富文本）到剪贴板：CF_UNICODETEXT + "HTML Format"
+pub fn write_text_rich(text: &str, html: Option<&str>) -> bool {
     let _guard = match CLIP_MUTEX.lock() {
         Ok(g) => g,
         Err(_) => return false,
@@ -229,8 +299,10 @@ pub fn write_text(text: &str) -> bool {
     if !open_clipboard() {
         return false;
     }
+    let mut ok = false;
     unsafe {
         let _ = EmptyClipboard();
+        // 1. 纯文本
         let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let bytes = wide.len() * 2;
         let h = match GlobalAlloc(GMEM_MOVEABLE, bytes) {
@@ -248,13 +320,37 @@ pub fn write_text(text: &str) -> bool {
         }
         std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr as *mut u16, wide.len());
         let _ = GlobalUnlock(h);
-        // 交给系统管理；失败时释放
-        if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(h.0))).is_err() {
+        if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(h.0))).is_ok() {
+            ok = true;
+        } else {
             let _ = GlobalFree(Some(h));
+        }
+
+        // 2. 富文本（可选）
+        if let Some(raw_html) = html {
+            let fragment = extract_fragment(raw_html);
+            if !fragment.trim().is_empty() {
+                let payload = build_cf_html(fragment);
+                if let Ok(h2) = GlobalAlloc(GMEM_MOVEABLE, payload.len()) {
+                    let p2 = GlobalLock(h2);
+                    if !p2.is_null() {
+                        std::ptr::copy_nonoverlapping(payload.as_ptr(), p2 as *mut u8, payload.len());
+                        let _ = GlobalUnlock(h2);
+                        let fmt = html_format();
+                        if fmt != 0 {
+                            if SetClipboardData(fmt, Some(HANDLE(h2.0))).is_ok() {
+                                ok = true;
+                            } else {
+                                let _ = GlobalFree(Some(h2));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     close_clipboard();
-    true
+    ok
 }
 
 /// 写入 RGBA 像素为 CF_DIB（32bpp BGRA，BI_RGB，自下而上）到剪贴板
@@ -407,4 +503,67 @@ pub fn format_names() -> Vec<String> {    let mut out = Vec::new();
     }
     close_clipboard();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造带真实字节偏移的 CF_HTML（模拟浏览器复制的内容）
+    fn sample_cf_html() -> String {
+        let frag = "<b>你好</b>";
+        let html = format!(
+            "<html><body><!--StartFragment-->{frag}<!--EndFragment--></body></html>"
+        );
+        let header_prefix = "Version:0.9\r\nStartHTML:0000000105\r\nEndHTML:0000000214\r\nStartFragment:0000000141\r\nEndFragment:0000000168\r\n";
+        let start = header_prefix.len() + "<html><body><!--StartFragment-->".len();
+        let end = start + frag.len();
+        let header = format!(
+            "Version:0.9\r\nStartHTML:{:010}\r\nEndHTML:{:010}\r\nStartFragment:{:010}\r\nEndFragment:{:010}\r\n",
+            header_prefix.len(),
+            header_prefix.len() + html.len(),
+            start,
+            end
+        );
+        format!("{header}{html}")
+    }
+
+    #[test]
+    fn extract_fragment_gets_marker_range() {
+        let raw = sample_cf_html();
+        let f = extract_fragment(&raw);
+        assert_eq!(f, "<b>你好</b>");
+    }
+
+    #[test]
+    fn extract_fragment_falls_back_to_full() {
+        // 无头部标记时整体作为 fragment
+        let f = extract_fragment("<p>plain</p>");
+        assert_eq!(f, "<p>plain</p>");
+    }
+
+    #[test]
+    fn build_cf_html_offsets_are_consistent() {
+        let payload = build_cf_html("<b>你好</b>");
+        let s = String::from_utf8(payload).unwrap();
+        assert!(s.starts_with("Version:0.9\r\nStartHTML:"));
+        // StartFragment 指向的位置必须恰好是 fragment 开头（前 20 字节为标记）
+        let line = s.split("\r\n").find(|l| l.starts_with("StartFragment:")).unwrap();
+        let off: usize = line["StartFragment:".len()..].parse().unwrap();
+        assert_eq!(&s[off - 20..off], "<!--StartFragment-->");
+        assert!(s[off..].starts_with("<b>你好</b>"));
+        // EndFragment 指向 fragment 结尾（之后紧跟 EndFragment 标记）
+        let line = s.split("\r\n").find(|l| l.starts_with("EndFragment:")).unwrap();
+        let off: usize = line["EndFragment:".len()..].parse().unwrap();
+        assert_eq!(&s[off - 7..off], "好</b>");
+        assert!(s[off..].starts_with("<!--EndFragment-->"));
+        // StartHTML < StartFragment < EndFragment < EndHTML
+        let num = |k: &str| -> usize {
+            let l = s.split("\r\n").find(|l| l.starts_with(k)).unwrap();
+            l[k.len()..].parse().unwrap()
+        };
+        assert!(num("StartHTML:") < num("StartFragment:"));
+        assert!(num("StartFragment:") < num("EndFragment:"));
+        assert!(num("EndFragment:") < num("EndHTML:"));
+    }
 }

@@ -98,9 +98,12 @@ pub fn paste_item(state: &AppState, id: i64) -> Result<(), String> {
             .ok_or("item not found")?
     };
 
-    // 2. 按类型写剪贴板
+    // 2. 按类型写剪贴板（文本含富文本时同时写 CF_HTML）
     let ok = match item.kind {
-        ItemKind::Text => clipboard::write_text(item.content.as_deref().unwrap_or_default()),
+        ItemKind::Text => clipboard::write_text_rich(
+            item.content.as_deref().unwrap_or_default(),
+            item.html.as_deref(),
+        ),
         ItemKind::Image => match &item.image_path {
             Some(path) => {
                 let bytes = std::fs::read(path).map_err(|e| e.to_string())?;

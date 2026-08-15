@@ -59,6 +59,15 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_items_pinned ON items(pinned);",
         )?;
+        // 迁移：v0.3.0 及更早的库没有 html 列（富文本支持）
+        let cols = self
+            .conn
+            .prepare("PRAGMA table_info(items)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !cols.iter().any(|c| c == "html") {
+            self.conn.execute_batch("ALTER TABLE items ADD COLUMN html TEXT")?;
+        }
         Ok(())
     }
 
@@ -67,11 +76,12 @@ impl Db {
     /// 插入新条目；hash 冲突时忽略并返回 None
     pub fn insert_item(&self, item: &Item) -> Result<Option<i64>, DbError> {
         let result = self.conn.execute(
-            "INSERT INTO items (kind, content, file_paths, image_path, thumb_path, hash, pinned, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO items (kind, content, html, file_paths, image_path, thumb_path, hash, pinned, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 item.kind.as_str(),
                 item.content,
+                item.html,
                 item.file_paths,
                 item.image_path,
                 item.thumb_path,
@@ -87,6 +97,15 @@ impl Db {
             }
             Err(e) => Err(DbError::Sql(e)),
         }
+    }
+
+    /// 为已有条目回填富文本（去重命中时升级用）
+    pub fn set_html(&self, id: i64, html: Option<String>) -> Result<(), DbError> {
+        self.conn.execute(
+            "UPDATE items SET html = ?1 WHERE id = ?2",
+            params![html, id],
+        )?;
+        Ok(())
     }
 
     /// 按 hash 查找条目 id
@@ -116,7 +135,7 @@ impl Db {
         let item = self
             .conn
             .query_row(
-                "SELECT id, kind, content, file_paths, image_path, thumb_path, hash, pinned, created_at
+                "SELECT id, kind, content, file_paths, image_path, thumb_path, hash, pinned, created_at, html
                  FROM items WHERE id = ?1",
                 params![id],
                 |row| row_to_item(row),
@@ -134,7 +153,7 @@ impl Db {
         offset: i64,
     ) -> Result<Vec<Item>, DbError> {
         let mut sql = String::from(
-            "SELECT id, kind, content, file_paths, image_path, thumb_path, hash, pinned, created_at
+            "SELECT id, kind, content, file_paths, image_path, thumb_path, hash, pinned, created_at, html
              FROM items WHERE 1=1",
         );
         let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -301,6 +320,7 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         hash: row.get(6)?,
         pinned: row.get::<_, i64>(7)? != 0,
         created_at: row.get(8)?,
+        html: row.get(9)?,
     })
 }
 
@@ -323,6 +343,7 @@ mod tests {
             id: 0,
             kind: ItemKind::Text,
             content: Some(format!("content-{hash}")),
+            html: None,
             file_paths: None,
             image_path: None,
             thumb_path: None,

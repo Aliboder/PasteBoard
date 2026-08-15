@@ -33,6 +33,8 @@ pub struct Item {
     pub kind: ItemKind,
     /// kind=text 时存纯文本
     pub content: Option<String>,
+    /// kind=text 时存富文本原文（CF_HTML，可选）
+    pub html: Option<String>,
     /// kind=files 时存文件路径 JSON 数组
     pub file_paths: Option<String>,
     /// kind=image 时存原图 PNG 磁盘绝对路径

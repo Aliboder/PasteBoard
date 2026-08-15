@@ -161,38 +161,49 @@ fn save_from_clipboard(
     state: &AppState,
     app: &AppHandle,
 ) -> Result<Option<(Item, bool)>, DbError> {
-    // 1. 类型判定：文件 > 图片 > 文本
-    let (kind, content, file_paths, image_data, hash) = if let Some(files) = clipboard::read_files()
-    {
-        let json = serde_json::to_string(&files).unwrap_or_else(|_| "[]".into());
-        (
-            ItemKind::Files,
-            None,
-            Some(json),
-            None,
-            dedup::hash_files(&files),
-        )
-    } else if let Some((rgba, w, h)) = clipboard::read_image_rgba() {
-        let Some(hash) = dedup::hash_image_rgba(&rgba, w, h) else {
+    // 1. 类型判定：文件 > 图片 > 文本（文本附带富文本 HTML）
+    let (kind, content, html, file_paths, image_data, hash) =
+        if let Some(files) = clipboard::read_files() {
+            let json = serde_json::to_string(&files).unwrap_or_else(|_| "[]".into());
+            (
+                ItemKind::Files,
+                None,
+                None,
+                Some(json),
+                None,
+                dedup::hash_files(&files),
+            )
+        } else if let Some((rgba, w, h)) = clipboard::read_image_rgba() {
+            let Some(hash) = dedup::hash_image_rgba(&rgba, w, h) else {
+                return Ok(None);
+            };
+            (ItemKind::Image, None, None, None, Some((rgba, w, h)), hash)
+        } else if let Some(text) = clipboard::read_text() {
+            if text.trim().is_empty() {
+                return Ok(None);
+            }
+            let text_hash = dedup::hash_text(&text);
+            let html = clipboard::read_html();
+            (ItemKind::Text, Some(text), html, None, None, text_hash)
+        } else {
             return Ok(None);
         };
-        (ItemKind::Image, None, None, Some((rgba, w, h)), hash)
-    } else if let Some(text) = clipboard::read_text() {
-        if text.trim().is_empty() {
-            return Ok(None);
-        }
-        let text_hash = dedup::hash_text(&text);
-        (ItemKind::Text, Some(text), None, None, text_hash)
-    } else {
-        return Ok(None);
-    };
 
     let db = state.db.lock().unwrap();
     let now = now_ms();
 
-    // 2. 去重：命中则顶到最前
+    // 2. 去重：命中则顶到最前；若旧条目无富文本而新捕获有，则升级回填
     if let Some(existing_id) = db.find_by_hash(&hash)? {
         db.touch_item(existing_id, now)?;
+        if let Some(h) = html {
+            let existing = db.get_item(existing_id)?.ok_or_else(|| {
+                DbError::Sql(rusqlite::Error::QueryReturnedNoRows)
+            })?;
+            if existing.html.is_none() {
+                db.set_html(existing_id, Some(h))?;
+                log::info!("upgraded item {existing_id} with html");
+            }
+        }
         let item = db.get_item(existing_id)?.ok_or_else(|| {
             DbError::Sql(rusqlite::Error::QueryReturnedNoRows)
         })?;
@@ -205,6 +216,7 @@ fn save_from_clipboard(
         id: 0,
         kind: kind.clone(),
         content,
+        html,
         file_paths,
         image_path: None,
         thumb_path: None,
