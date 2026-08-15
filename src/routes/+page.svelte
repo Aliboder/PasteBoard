@@ -40,6 +40,7 @@
     Keyboard,
     History,
     Wrench,
+    Folder,
     Image as ImageIcon,
     ClipboardList,
   } from "lucide-svelte";
@@ -59,6 +60,84 @@
     { k: "image", label: "图片" },
     { k: "files", label: "文件" },
   ];
+
+  /** 分流：上方横向区 = 图片+文件；下方列表 = 文本 */
+  let topItems = $derived(items.filter((i) => i.kind !== "text"));
+  let textItems = $derived(items.filter((i) => i.kind === "text"));
+
+  // ---------- 文本列表虚拟滚动 ----------
+  /** 行高三档：1 行 / 2 行 / 3 行（与 .row 内 padding + title 行高 + time 一致，留 3~4px 裕量） */
+  const ROW_H_SHORT = 56;
+  const ROW_H_MID = 76;
+  const ROW_H_LONG = 96;
+  /** 视口上下各多渲染的行数（缓冲） */
+  const VIRTUAL_BUFFER = 4;
+  let listEl: HTMLElement | undefined = $state();
+  let listScrollTop = $state(0);
+  let listViewportH = $state(400);
+
+  /** 估算条目行高：按当前列表宽度估算换行数（换行文本一律按 3 行档） */
+  function rowHeightOf(item: ItemDto): number {
+    const text = item.preview;
+    if (text.includes("\n")) return ROW_H_LONG;
+    const cpl = Math.max(16, Math.floor(((listEl?.clientWidth ?? 300) - 48) / 13.5));
+    const lines = Math.min(3, Math.max(1, Math.ceil(text.length / cpl)));
+    return lines === 1 ? ROW_H_SHORT : lines === 2 ? ROW_H_MID : ROW_H_LONG;
+  }
+
+  const rowHeights = $derived(textItems.map(rowHeightOf));
+  /** rowOffsets[i] = 第 0..i 行累计高度（行 i 底边） */
+  const rowOffsets = $derived.by(() => {
+    const arr: number[] = [];
+    let acc = 0;
+    for (const h of rowHeights) {
+      acc += h;
+      arr.push(acc);
+    }
+    return arr;
+  });
+  const totalHeight = $derived(rowOffsets[rowOffsets.length - 1] ?? 0);
+
+  /** 第一个底边 > offset 的行索引（二分） */
+  function firstIndexAfter(offset: number): number {
+    const arr = rowOffsets;
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (arr[m] <= offset) lo = m + 1;
+      else hi = m;
+    }
+    return lo;
+  }
+
+  const viewStart = $derived.by(() =>
+    Math.max(0, firstIndexAfter(Math.max(0, listScrollTop - VIRTUAL_BUFFER * ROW_H_LONG)))
+  );
+  const viewEnd = $derived.by(() =>
+    Math.min(
+      rowOffsets.length,
+      firstIndexAfter(listScrollTop + listViewportH + VIRTUAL_BUFFER * ROW_H_LONG)
+    )
+  );
+  const visibleTextItems = $derived.by(() => textItems.slice(viewStart, viewEnd));
+
+  function onListScroll(e: Event) {
+    const el = e.currentTarget as HTMLElement;
+    listScrollTop = el.scrollTop;
+    listViewportH = el.clientHeight;
+  }
+
+  /** 键盘导航时选中行保持可见 */
+  $effect(() => {
+    const el = listEl;
+    if (!el || selected < 0 || selected >= rowOffsets.length) return;
+    const top = selected === 0 ? 0 : rowOffsets[selected - 1];
+    const h = rowHeights[selected];
+    if (top < el.scrollTop) el.scrollTop = top;
+    else if (top + h > el.scrollTop + el.clientHeight)
+      el.scrollTop = top + h - el.clientHeight;
+  });
   let selected = $state(-1);
   let loading = $state(true);
   let error = $state("");
@@ -112,6 +191,7 @@
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let textHoverTimer: ReturnType<typeof setTimeout> | null = null;
   let listSectionEl: HTMLElement | undefined = $state();
+  let contentEl: HTMLElement | undefined = $state();
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 主题：dark / light / system（system 跟随系统深色模式，实时响应变化） */
@@ -148,6 +228,7 @@
   function watchResize() {
     const win = getCurrentWindow();
     win.onResized(async () => {
+      if (listEl) listViewportH = listEl.clientHeight;
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(async () => {
         try {
@@ -330,10 +411,6 @@
     }
   }
 
-  /** 分流：上方横向区 = 图片+文件；下方列表 = 文本 */
-  let topItems = $derived(items.filter((i) => i.kind !== "text"));
-  let textItems = $derived(items.filter((i) => i.kind === "text"));
-
   async function reload() {
     loading = true;
     items = await getHistory(filter, kindFilter, 500, 0);
@@ -392,7 +469,7 @@
 
   /** 图片悬停大图预览（350ms 延迟，原图懒加载并缓存）；
    *  image 类型走库内原图；files 类型仅对图片文件（按扩展名）走路径读取；
-   *  位置固定在图片条下方，高度随窗口剩余空间自适应，不遮挡图片区 */
+   *  位置相对内容区（content）计算，横条/网格/文件列表统一复用 */
   async function showPreview(item: ItemDto, rowEl: HTMLElement) {
     if (item.kind !== "image" && item.kind !== "files") return;
     if (hoverTimer) clearTimeout(hoverTimer);
@@ -413,8 +490,10 @@
       if (!src) return;
       const MAX_H = 300;
       const FOOTER_RESERVE = 44;
-      const itemBottom = rowEl.offsetTop + rowEl.offsetHeight;
-      // 优先显示在条目（图片条）下方
+      const rowRect = rowEl.getBoundingClientRect();
+      const contentRect = contentEl?.getBoundingClientRect() ?? rowRect;
+      const itemBottom = rowRect.bottom - contentRect.top;
+      // 优先显示在条目下方
       let top = itemBottom + 8;
       let avail = window.innerHeight - FOOTER_RESERVE - top;
       if (avail < 80) {
@@ -434,7 +513,7 @@
 
   /** 文本悬停全文预览：350ms 延迟；3 行内能显示完的短文本不弹，避免打扰 */
   function showTextPreview(item: ItemDto, rowEl: HTMLElement) {
-    const text = item.preview;
+    const text = item.full ?? item.preview;
     // 约 3 行 ≈ 80 字符，无换行且更短的内容无需预览
     if (text.length <= 80 && !text.includes("\n")) return;
     if (textHoverTimer) clearTimeout(textHoverTimer);
@@ -716,8 +795,8 @@
     </section>
   {/if}
 
-  <!-- 内容区：上方媒体横向区（20%）+ 下方文本列表 -->
-  <div class="content">
+  <!-- 内容区：类型 Tab + 按类型切换布局 -->
+  <div class="content" bind:this={contentEl}>
     <!-- 类型筛选：全部 / 文本 / 图片 / 文件（与搜索叠加） -->
     <div class="kind-tabs">
       {#each kindTabs as tab (tab.k)}
@@ -735,7 +814,8 @@
       {/each}
     </div>
 
-    <!-- 上方：图片 / 文件，横向排布 -->
+    {#if kindFilter === ""}
+    <!-- 全部 Tab：上方图片/文件横向条 -->
     <section class="strip-section">
       <div class="section-header">
         <span class="section-title">
@@ -806,62 +886,112 @@
             </div>
           {/each}
         </div>
-        {#if hoverPreview}
-          <div
-            class="img-preview"
-            style="top: {hoverPreview.top}px; height: {hoverPreview.height}px"
-          >
-            <img src="data:image/png;base64,{hoverPreview.src}" alt="预览" />
-          </div>
-        {/if}
       {/if}
     </section>
-
-    <!-- 下方：文本历史（垂直列表，交互不变） -->
-    <section class="list-section" bind:this={listSectionEl}>
+    {:else if kindFilter === "image"}
+    <!-- 图片 Tab：纵向网格，充分利用空间 -->
+    <section class="grid-section">
       <div class="section-header">
         <span class="section-title">
-          <ClipboardList size={12} />
-          文本
+          <ImageIcon size={12} />
+          图片
         </span>
-        <span class="section-count">{textItems.length} 条</span>
+        <span class="section-count">{topItems.length} 条</span>
       </div>
-      <main class="list">
-        {#if loading}
-          <p class="empty">加载中…</p>
-        {:else if textItems.length === 0}
-          <p class="empty">
-            {filter ? "没有匹配的文本" : "暂无文本历史\n复制文字试试"}
-          </p>
-        {:else}
-          {#each textItems as item, i (item.id)}
+      {#if topItems.length === 0}
+        <p class="strip-empty">暂无图片历史</p>
+      {:else}
+        <div class="grid">
+          {#each topItems as item (item.id)}
             <div
-              class="row {item.kind}"
-              class:selected={i === selected}
+              class="grid-item"
               class:pinned={item.pinned}
               role="option"
-              aria-selected={i === selected}
+              aria-selected={false}
               tabindex="-1"
-              onmouseenter={(e) => {
-                selected = i;
-                showTextPreview(item, e.currentTarget as HTMLElement);
-              }}
-              onmouseleave={hideTextPreview}
+              title={`图片 · ${timeLabel(item.created_at)}`}
+              onmouseenter={(e) => showPreview(item, e.currentTarget as HTMLElement)}
+              onmouseleave={hidePreview}
               onclick={() => paste(item.id)}
               onkeydown={(e) => {
                 if (e.key === "Enter") paste(item.id);
               }}
             >
-              <div class="meta">
-                <span class="title">
-                  {#if item.pinned}
-                    <Star size={11} fill="currentColor" class="pin-star" />
-                  {/if}
-                  {item.preview}
+              {#if item.thumb}
+                <img src="data:image/png;base64,{item.thumb}" alt="图片" draggable="false" />
+              {:else}
+                <span class="strip-placeholder">
+                  <ImageIcon size={16} />
                 </span>
-                <span class="time">{timeLabel(item.created_at)}</span>
+              {/if}
+              {#if item.pinned}
+                <span class="grid-pin-badge">
+                  <Star size={11} fill="currentColor" />
+                </span>
+              {/if}
+              <span class="grid-time">{timeLabel(item.created_at)}</span>
+              <div class="grid-actions">
+                <button
+                  class="icon-btn mini {item.pinned ? 'active' : ''}"
+                  title={item.pinned ? "取消固定" : "固定"}
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    togglePin(item);
+                  }}
+                >
+                  {#if item.pinned}
+                    <Pin size={11} fill="currentColor" />
+                  {:else}
+                    <PinOff size={11} />
+                  {/if}
+                </button>
+                <button
+                  class="icon-btn mini danger"
+                  title="删除"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    remove(item);
+                  }}
+                >
+                  <X size={11} />
+                </button>
               </div>
-
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </section>
+    {:else if kindFilter === "files"}
+    <!-- 文件 Tab：纵向列表，图标 + 名称 + 路径 -->
+    <section class="file-section">
+      <div class="section-header">
+        <span class="section-title">
+          <Folder size={12} />
+          文件
+        </span>
+        <span class="section-count">{topItems.length} 条</span>
+      </div>
+      {#if topItems.length === 0}
+        <p class="strip-empty">暂无文件历史</p>
+      {:else}
+        <div class="file-list">
+          {#each topItems as item (item.id)}
+            <div
+              class="file-row"
+              class:pinned={item.pinned}
+              role="option"
+              aria-selected={false}
+              tabindex="-1"
+              title={`${item.preview} · ${timeLabel(item.created_at)}`}
+              onmouseenter={(e) => showPreview(item, e.currentTarget as HTMLElement)}
+              onmouseleave={hidePreview}
+              onclick={() => paste(item.id)}
+              onkeydown={(e) => {
+                if (e.key === "Enter") paste(item.id);
+              }}
+            >
+              <FileTile path={item.preview} name={fileName(item)} horizontal />
+              <span class="file-time">{timeLabel(item.created_at)}</span>
               <div class="actions">
                 <button
                   class="icon-btn {item.pinned ? 'active' : ''}"
@@ -890,6 +1020,94 @@
               </div>
             </div>
           {/each}
+        </div>
+      {/if}
+    </section>
+    {/if}
+
+    {#if kindFilter === "" || kindFilter === "text"}
+    <!-- 文本历史（全部与文本 Tab 显示） -->
+    <section
+      class="list-section"
+      class:no-top={kindFilter !== ""}
+      bind:this={listSectionEl}
+    >
+      <div class="section-header">
+        <span class="section-title">
+          <ClipboardList size={12} />
+          文本
+        </span>
+        <span class="section-count">{textItems.length} 条</span>
+      </div>
+      <main class="list" bind:this={listEl} onscroll={onListScroll}>
+        {#if loading}
+          <p class="empty">加载中…</p>
+        {:else if textItems.length === 0}
+          <p class="empty">
+            {filter ? "没有匹配的文本" : "暂无文本历史\n复制文字试试"}
+          </p>
+        {:else}
+          <div class="list-inner" style="height: {totalHeight}px">
+            {#each visibleTextItems as item, vi (item.id)}
+              {@const gi = viewStart + vi}
+              {@const top = gi === 0 ? 0 : rowOffsets[gi - 1]}
+              <div
+                class="row {item.kind}"
+                class:selected={gi === selected}
+                class:pinned={item.pinned}
+                style="top: {top}px"
+                role="option"
+                aria-selected={gi === selected}
+                tabindex="-1"
+                onmouseenter={(e) => {
+                  selected = gi;
+                  showTextPreview(item, e.currentTarget as HTMLElement);
+                }}
+                onmouseleave={hideTextPreview}
+                onclick={() => paste(item.id)}
+                onkeydown={(e) => {
+                  if (e.key === "Enter") paste(item.id);
+                }}
+              >
+                <div class="meta">
+                  <span class="title">
+                    {#if item.pinned}
+                      <Star size={11} fill="currentColor" class="pin-star" />
+                    {/if}
+                    {item.preview}
+                  </span>
+                  <span class="time">{timeLabel(item.created_at)}</span>
+                </div>
+
+                <div class="actions">
+                  <button
+                    class="icon-btn {item.pinned ? 'active' : ''}"
+                    title={item.pinned ? "取消固定" : "固定"}
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      togglePin(item);
+                    }}
+                  >
+                    {#if item.pinned}
+                      <Pin size={13} fill="currentColor" />
+                    {:else}
+                      <PinOff size={13} />
+                    {/if}
+                  </button>
+                  <button
+                    class="icon-btn danger"
+                    title="删除"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      remove(item);
+                    }}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              </div>
+            {/each}
+          </div>
         {/if}
       </main>
 
@@ -902,6 +1120,16 @@
         </div>
       {/if}
     </section>
+    {/if}
+
+    {#if hoverPreview}
+      <div
+        class="img-preview"
+        style="top: {hoverPreview.top}px; height: {hoverPreview.height}px"
+      >
+        <img src="data:image/png;base64,{hoverPreview.src}" alt="预览" />
+      </div>
+    {/if}
   </div>
 
   <!-- 错误提示 toast（不遮挡列表，3 秒自动消失） -->
@@ -1397,6 +1625,132 @@
     font-size: 12px;
   }
 
+  /* 图片 Tab：纵向网格 */
+  .grid-section {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 2px 10px 6px;
+  }
+  .grid {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 8px;
+    align-content: start;
+    padding: 2px 0 8px;
+  }
+  .grid-item {
+    position: relative;
+    aspect-ratio: 1;
+    border-radius: 9px;
+    overflow: hidden;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: border-color 0.12s, transform 0.12s, box-shadow 0.12s;
+  }
+  .grid-item img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .grid-item:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  }
+  .grid-item.pinned {
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  .grid-time {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    font-size: 9.5px;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.55);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-family: "Cascadia Mono", Consolas, monospace;
+    pointer-events: none;
+  }
+  .grid-pin-badge {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    color: var(--accent);
+    display: flex;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+    pointer-events: none;
+  }
+  .grid-actions {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.12s;
+  }
+  .grid-item:hover .grid-actions {
+    opacity: 1;
+  }
+
+  /* 文件 Tab：纵向列表 */
+  .file-section {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 2px 10px 6px;
+  }
+  .file-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 2px 0 8px;
+  }
+  .file-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    margin-bottom: 3px;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+  .file-row:hover {
+    background: var(--bg-hover);
+  }
+  .file-row.pinned {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+  }
+  .file-row.pinned::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  .file-time {
+    color: var(--text-dim);
+    font-size: 10.5px;
+    font-family: "Cascadia Mono", Consolas, monospace;
+    flex-shrink: 0;
+  }
+
   /* 下方：文本列表 */
   .list-section {
     flex: 1;
@@ -1406,6 +1760,9 @@
     border-top: 1px solid var(--border);
     position: relative;
   }
+  .list-section.no-top {
+    border-top: none;
+  }
   .list-section .section-header {
     padding: 6px 12px 4px;
   }
@@ -1414,8 +1771,12 @@
   .list {
     flex: 1;
     overflow-y: auto;
-    padding: 2px 10px 8px;
+    padding: 2px 0 8px;
     outline: none;
+  }
+  .list-inner {
+    position: relative;
+    padding: 0 10px;
   }
   .list::-webkit-scrollbar {
     width: 6px;
@@ -1460,9 +1821,6 @@
     margin-right: 4px;
     vertical-align: -1px;
   }
-  .row {
-    position: relative;
-  }
   .row.pinned {
     background: color-mix(in srgb, var(--accent) 7%, transparent);
   }
@@ -1481,11 +1839,13 @@
   }
 
   .row {
+    position: absolute;
+    left: 0;
+    right: 0;
     display: flex;
     align-items: center;
     gap: 10px;
     padding: 8px 10px;
-    margin-bottom: 3px;
     border-radius: 9px;
     cursor: pointer;
     transition: background 0.12s;

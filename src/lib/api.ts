@@ -7,6 +7,7 @@ export interface ItemDto {
   id: number;
   kind: ItemKind;
   preview: string;
+  full: string | null;
   thumb: string | null;
   file_count: number;
   pinned: boolean;
