@@ -8,11 +8,37 @@ use windows::Win32::Graphics::Gdi::{
     DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
 };
-use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+use windows::Win32::UI::Shell::{
+    SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_USEFILEATTRIBUTES,
+};
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
 
 /// 按扩展名缓存图标 base64（None = 提取失败，不再重试）
 static ICON_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+/// 按路径缓存缩略图/大预览 base64（避免同一文件反复解码，上限 200 防内存膨胀）
+static THUMB_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+static PREVIEW_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+const CACHE_MAX: usize = 200;
+
+/// 带容量上限的缓存读取/写入（超出删最旧，迭代顺序 = 插入顺序）
+fn cache_get_or_insert(
+    cache: &OnceLock<Mutex<HashMap<String, Option<String>>>>,
+    key: &str,
+    compute: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let mut map = cache.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    if let Some(v) = map.get(key) {
+        return v.clone();
+    }
+    let v = compute();
+    if map.len() >= CACHE_MAX {
+        if let Some(old) = map.keys().next().cloned() {
+            map.remove(&old);
+        }
+    }
+    map.insert(key.to_string(), v.clone());
+    v
+}
 
 /// 获取文件类型图标（Shell API，与资源管理器一致），返回 PNG base64
 pub fn file_icon_png(path: &str) -> Option<String> {
@@ -35,7 +61,9 @@ unsafe fn extract_icon(path: &str) -> Option<Vec<u8>> {
         Default::default(),
         Some(&mut info),
         std::mem::size_of::<SHFILEINFOW>() as u32,
-        SHGFI_ICON | SHGFI_LARGEICON,
+        // USEFILEATTRIBUTES：不访问文件本体，仅按扩展名关联取系统图标——
+        // 剪贴板记录的是路径引用，原文件可能已被移动/删除，图标仍应正确显示
+        SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES,
     );
     if ret == 0 || info.hIcon.0.is_null() {
         return None;
@@ -105,24 +133,28 @@ unsafe fn extract_icon(path: &str) -> Option<Vec<u8>> {
     result
 }
 
-/// 图片文件缩略图（PNG base64，最长边 256，保持比例）
+/// 图片文件缩略图（PNG base64，最长边 256，保持比例；按路径缓存）
 pub fn file_thumb_png(path: &str) -> Option<String> {
-    let img = image::open(path).ok()?;
-    let thumb = img.thumbnail(256, 256);
-    let mut buf = Vec::new();
-    thumb
-        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
-        .ok()?;
-    Some(base64_encode(&buf))
+    cache_get_or_insert(&THUMB_CACHE, path, || {
+        let img = image::open(path).ok()?;
+        let thumb = img.thumbnail(256, 256);
+        let mut buf = Vec::new();
+        thumb
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .ok()?;
+        Some(base64_encode(&buf))
+    })
 }
 
-/// 图片文件大预览（PNG base64，最长边 1024，保持比例；悬停预览用）
+/// 图片文件大预览（PNG base64，最长边 1024，保持比例；悬停预览用，按路径缓存）
 pub fn file_preview_png(path: &str) -> Option<String> {
-    let img = image::open(path).ok()?;
-    let preview = img.thumbnail(1024, 1024);
-    let mut buf = Vec::new();
-    preview
-        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
-        .ok()?;
-    Some(base64_encode(&buf))
+    cache_get_or_insert(&PREVIEW_CACHE, path, || {
+        let img = image::open(path).ok()?;
+        let preview = img.thumbnail(1024, 1024);
+        let mut buf = Vec::new();
+        preview
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .ok()?;
+        Some(base64_encode(&buf))
+    })
 }

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { Image as ImageIcon } from "lucide-svelte";
   import { getThumb } from "./api";
+  import { throttled } from "./thumbQueue";
 
   let { id, alt = "图片" }: { id: number; alt?: string } = $props();
 
@@ -9,29 +10,57 @@
   const thumbCache = new Map<number, string>();
 
   let src = $state<string | null>(null);
+  let rootEl: HTMLElement | undefined = $state();
+  let loaded = $state(false);
 
-  onMount(async () => {
+  async function load() {
+    if (loaded) return;
+    loaded = true;
     let s = thumbCache.get(id);
     if (s === undefined) {
-      const fetched = await getThumb(id);
+      const fetched = await throttled(() => getThumb(id));
       if (fetched) {
         thumbCache.set(id, fetched);
         s = fetched;
       }
     }
     src = s ?? null;
+  }
+
+  /** 进入视口才加载（网格卡片多时避免一次性请求风暴） */
+  onMount(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          observer.disconnect();
+          load();
+        }
+      },
+      { rootMargin: "120px" }
+    );
+    if (rootEl) observer.observe(rootEl);
+    return () => observer.disconnect();
   });
 </script>
 
-{#if src}
-  <img src={src} alt={alt} draggable="false" />
-{:else}
-  <span class="thumb-placeholder">
-    <ImageIcon size={16} />
-  </span>
-{/if}
+<div bind:this={rootEl} class="thumb-wrap">
+  {#if src}
+    <img src={src} alt={alt} draggable="false" />
+  {:else}
+    <span class="thumb-placeholder">
+      <ImageIcon size={16} />
+    </span>
+  {/if}
+</div>
 
 <style>
+  .thumb-wrap {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
   img {
     width: 100%;
     height: 100%;

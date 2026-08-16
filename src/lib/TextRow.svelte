@@ -12,7 +12,6 @@
     filter = "",
     confirmDeleteId = null,
     onSelect,
-    onLeave,
     onPaste,
     onContext,
     onTogglePin,
@@ -26,7 +25,6 @@
     filter?: string;
     confirmDeleteId?: number | null;
     onSelect: (el: HTMLElement, item: ItemDto) => void;
-    onLeave: () => void;
     onPaste: (id: number) => void;
     onContext: (e: MouseEvent, item: ItemDto) => void;
     onTogglePin: (item: ItemDto) => void;
@@ -44,7 +42,6 @@
   aria-selected={selected}
   tabindex="-1"
   onmouseenter={(e) => onSelect(e.currentTarget as HTMLElement, item)}
-  onmouseleave={onLeave}
   onclick={() => onPaste(item.id)}
   oncontextmenu={(e) => onContext(e, item)}
   onkeydown={(e) => {

@@ -1,34 +1,36 @@
-/* 共享主题变量（主窗口与设置窗口共用） */
+/* 共享主题变量（对齐 Windows 11 Fluent/Mica 配色） */
 :root {
   color: var(--text);
-  --bg: #131418;
-  --bg-grad: #1a1c23;
-  --bg-soft: #1e2129;
-  --bg-hover: #272b36;
-  --border: #2b2f3a;
-  --border-strong: #3d4250;
-  --text: #e9ebf2;
-  --text-dim: #8b91a3;
-  --accent: #4da3ff;
-  --accent-soft: rgba(77, 163, 255, 0.13);
-  --danger: #f07178;
-  --shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
-  --radius: 14px;
+  --bg: #1f1f1f;
+  --bg-grad: #262626;
+  --bg-soft: #2b2b2b;
+  --bg-hover: #383838;
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --text: #ffffff;
+  --text-dim: rgba(255, 255, 255, 0.7);
+  --accent: #4cc2ff;
+  --accent-soft: rgba(255, 255, 255, 0.06);
+  --accent-fg: #0a0a0a;
+  --danger: #f06d6b;
+  --shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  --radius: 10px;
   font-family: "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
     "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
 }
 
 :root[data-theme="light"] {
-  --bg: #f2f3f7;
-  --bg-grad: #fafbfd;
+  --bg: #f3f3f3;
+  --bg-grad: #fafafa;
   --bg-soft: #ffffff;
-  --bg-hover: #e7e9ef;
-  --border: #d8dbe3;
-  --border-strong: #c3c7d1;
-  --text: #20242c;
-  --text-dim: #6a7080;
-  --accent: #2f6fd8;
-  --accent-soft: rgba(47, 111, 216, 0.11);
-  --danger: #d64550;
-  --shadow: 0 16px 48px rgba(30, 35, 50, 0.26);
+  --bg-hover: #eaeaea;
+  --border: rgba(0, 0, 0, 0.09);
+  --border-strong: rgba(0, 0, 0, 0.16);
+  --text: #1f1f1f;
+  --text-dim: rgba(0, 0, 0, 0.62);
+  --accent: #0078d4;
+  --accent-soft: rgba(0, 120, 212, 0.1);
+  --accent-fg: #ffffff;
+  --danger: #d13438;
+  --shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
 }

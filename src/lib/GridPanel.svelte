@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { Folder, Image as ImageIcon, Pin, PinOff, X } from "lucide-svelte";
   import type { ItemDto } from "./api";
   import { timeLabel } from "./utils";
@@ -16,8 +17,6 @@
     onContext,
     onTogglePin,
     onRemove,
-    onHover,
-    onLeave,
   }: {
     items: ItemDto[];
     kind: "image" | "files";
@@ -29,8 +28,6 @@
     onContext: (e: MouseEvent, item: ItemDto) => void;
     onTogglePin: (item: ItemDto) => void;
     onRemove: (item: ItemDto) => void;
-    onHover: (item: ItemDto, el: HTMLElement) => void;
-    onLeave: () => void;
   } = $props();
 
   let gridEl: HTMLElement | undefined = $state();
@@ -39,6 +36,30 @@
   $effect(() => {
     bindGridEl(gridEl);
     return () => bindGridEl(undefined);
+  });
+
+  /** 列数：读计算样式（图片/文件 Tab 均自适应） */
+  function gridCols(): number {
+    if (!gridEl) return 1;
+    return getComputedStyle(gridEl).gridTemplateColumns.split(" ").filter(Boolean).length || 1;
+  }
+
+  /** 把行轨道高度绑定为实际列宽（grid-auto-rows），
+   *  防止容器高度不足时 grid 将 auto 行压缩到 min-content 导致卡片上下重叠 */
+  function updateCellSize() {
+    if (!gridEl) return;
+    const cols = gridCols();
+    const gap = 8;
+    const cell = (gridEl.clientWidth - (cols - 1) * gap) / cols;
+    gridEl.style.gridAutoRows = `${Math.max(48, Math.floor(cell))}px`;
+  }
+
+  /** 容器宽度变化（窗口缩放/列数变化）时重算卡片尺寸 */
+  onMount(() => {
+    updateCellSize();
+    const observer = new ResizeObserver(updateCellSize);
+    if (gridEl) observer.observe(gridEl);
+    return () => observer.disconnect();
   });
 
   /** 横向卡片显示名：取文件名（多文件时加数量） */
@@ -64,7 +85,7 @@
   {#if items.length === 0}
     <p class="strip-empty">{kind === "image" ? "暂无图片历史" : "暂无文件历史"}</p>
   {:else}
-    <div class="grid {kind === 'files' ? 'grid-5' : ''}" bind:this={gridEl}>
+    <div class="grid" bind:this={gridEl}>
       {#each items as item, gi (item.id)}
         <div
           class="grid-item"
@@ -76,11 +97,7 @@
           title={item.kind === "image"
             ? `图片 · ${timeLabel(item.created_at)}`
             : `${item.preview} · ${timeLabel(item.created_at)}`}
-          onmouseenter={(e) => {
-            onSelect(gi);
-            onHover(item, e.currentTarget as HTMLElement);
-          }}
-          onmouseleave={onLeave}
+          onmouseenter={() => onSelect(gi)}
           onclick={() => onPaste(item.id)}
           oncontextmenu={(e) => onContext(e, item)}
           onkeydown={(e) => {
@@ -185,11 +202,9 @@
     background: var(--border);
     border-radius: 3px;
   }
-  .grid-5 {
-    grid-template-columns: repeat(5, 1fr);
-  }
   .grid-item {
     position: relative;
+    /* 高度由行轨道决定（grid-auto-rows 由 JS 绑定为列宽，见 updateCellSize） */
     aspect-ratio: 1;
     border-radius: 9px;
     overflow: hidden;
@@ -231,16 +246,15 @@
     line-height: 1.3;
     color: #fff;
     background: rgba(0, 0, 0, 0.45);
-    padding: 1px 4px;
+    padding: 2px 4px;
     border-radius: 4px;
     font-family: "Cascadia Mono", Consolas, monospace;
     pointer-events: none;
     transition: opacity 0.12s;
-    /* 长格式时间防溢出：单行省略 */
+    /* 自适应换行：宽度不足时在"日期 时间"之间的空格处自然断行，不截断 */
+    text-align: left;
+    white-space: normal;
     max-width: calc(100% - 6px);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .grid-item:hover .grid-time {
     opacity: 0;

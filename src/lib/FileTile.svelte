@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getFileIcon, getFileThumb } from "./api";
+  import { throttled } from "./thumbQueue";
   import { FileText } from "lucide-svelte";
 
   let { path, name }: { path: string; name: string } = $props();
@@ -15,8 +16,12 @@
 
   let kind = $state<"thumb" | "icon" | "none">("none");
   let src = $state("");
+  let rootEl: HTMLElement | undefined = $state();
+  let loaded = $state(false);
 
-  onMount(async () => {
+  async function load() {
+    if (loaded) return;
+    loaded = true;
     const cached = mediaCache.get(path);
     if (cached) {
       kind = cached.kind;
@@ -25,7 +30,7 @@
     }
     const ext = path.split(".").pop()?.toLowerCase() ?? "";
     if (IMAGE_EXTS.has(ext)) {
-      const thumb = await getFileThumb(path);
+      const thumb = await throttled(() => getFileThumb(path));
       if (thumb) {
         kind = "thumb";
         src = thumb;
@@ -33,28 +38,53 @@
         return;
       }
     }
-    const icon = await getFileIcon(path);
+    const icon = await throttled(() => getFileIcon(path));
     if (icon) {
       kind = "icon";
       src = icon;
       mediaCache.set(path, { kind, src });
     }
+  }
+
+  /** 进入视口才加载（网格卡片多时避免一次性请求风暴） */
+  onMount(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          observer.disconnect();
+          load();
+        }
+      },
+      { rootMargin: "120px" }
+    );
+    if (rootEl) observer.observe(rootEl);
+    return () => observer.disconnect();
   });
 </script>
 
-{#if kind === "thumb"}
-  <img class="tile-thumb" src="data:image/png;base64,{src}" alt={name} draggable="false" />
-{:else if kind === "icon"}
-  <img class="tile-icon" src="data:image/png;base64,{src}" alt={name} draggable="false" />
-  <span class="file-name">{name}</span>
-{:else}
-  <span class="file-icon">
-    <FileText size={18} />
-  </span>
-  <span class="file-name">{name}</span>
-{/if}
+<div bind:this={rootEl} class="file-tile">
+  {#if kind === "thumb"}
+    <img class="tile-thumb" src="data:image/png;base64,{src}" alt={name} draggable="false" />
+  {:else if kind === "icon"}
+    <img class="tile-icon" src="data:image/png;base64,{src}" alt={name} draggable="false" />
+    <span class="file-name">{name}</span>
+  {:else}
+    <span class="file-icon">
+      <FileText size={18} />
+    </span>
+    <span class="file-name">{name}</span>
+  {/if}
+</div>
 
 <style>
+  .file-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+  }
   .tile-thumb {
     width: 100%;
     height: 100%;

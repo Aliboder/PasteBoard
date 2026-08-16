@@ -9,8 +9,6 @@
     copyItem,
     openFileLocation,
     openFile,
-    getImage,
-    getFilePreview,
     getSettings,
     setWindowSize,
     onChange,
@@ -24,7 +22,7 @@
   import GridPanel from "../lib/GridPanel.svelte";
   import SettingsPanel from "../lib/SettingsPanel.svelte";
   import ImageThumb from "../lib/ImageThumb.svelte";
-  import { PREVIEW_IMAGE_EXTS, splitHighlight, timeLabel } from "../lib/utils";
+  import { splitHighlight, timeLabel } from "../lib/utils";
   import {
     Search,
     X,
@@ -219,15 +217,7 @@
   /** 右键菜单 */
   let ctxMenu = $state<{ x: number; y: number; item: ItemDto } | null>(null);
 
-  let hoverPreview = $state<{ src: string; top: number; height: number } | null>(null);
-  let textPreview = $state<{ text: string; top: number; height: number } | null>(null);
-  /** 悬停预览缓存（上限 30 张，LRU 淘汰，防长时间运行内存膨胀） */
-  const previewCache = new Map<number, string>();
-  const PREVIEW_CACHE_MAX = 30;
-  let hoverTimer: ReturnType<typeof setTimeout> | null = null;
-  let textHoverTimer: ReturnType<typeof setTimeout> | null = null;
   let listSectionEl: HTMLElement | undefined = $state();
-  let contentEl: HTMLElement | undefined = $state();
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 主题：dark / light / system（system 跟随系统深色模式，实时响应变化） */
@@ -372,87 +362,7 @@
     }
   }
 
-  /** 图片悬停大图预览（350ms 延迟，原图懒加载并缓存）；
-   *  image 类型走库内原图；files 类型仅对图片文件（按扩展名）走路径读取；
-   *  位置相对内容区（content）计算，横条/网格/文件列表统一复用 */
-  async function showPreview(item: ItemDto, rowEl: HTMLElement) {
-    if (item.kind !== "image" && item.kind !== "files") return;
-    if (hoverTimer) clearTimeout(hoverTimer);
-    hoverTimer = setTimeout(async () => {
-      let src = previewCache.get(item.id);
-      if (!src) {
-        if (item.kind === "image") {
-          src = (await getImage(item.id)) ?? "";
-        } else {
-          // files：第一个文件路径，仅图片扩展名可预览
-          const path = item.preview;
-          const ext = path.split(".").pop()?.toLowerCase() ?? "";
-          if (!PREVIEW_IMAGE_EXTS.has(ext)) return;
-          src = (await getFilePreview(path)) ?? "";
-        }
-        if (src) {
-          previewCache.delete(item.id);
-          previewCache.set(item.id, src);
-          if (previewCache.size > PREVIEW_CACHE_MAX) {
-            const oldest = previewCache.keys().next().value;
-            if (oldest !== undefined) previewCache.delete(oldest);
-          }
-        }
-      }
-      if (!src) return;
-      const MAX_H = 300;
-      const FOOTER_RESERVE = 44;
-      const rowRect = rowEl.getBoundingClientRect();
-      const contentRect = contentEl?.getBoundingClientRect() ?? rowRect;
-      const itemBottom = rowRect.bottom - contentRect.top;
-      // 优先显示在条目下方
-      let top = itemBottom + 8;
-      let avail = window.innerHeight - FOOTER_RESERVE - top;
-      if (avail < 80) {
-        // 下方空间不足：改到条目上方（受顶部边界约束）
-        top = Math.max(8, itemBottom - MAX_H - 8);
-        avail = window.innerHeight - FOOTER_RESERVE - top;
-      }
-      const height = Math.min(MAX_H, Math.max(80, avail));
-      hoverPreview = { src, top, height };
-    }, 350);
-  }
-
-  function hidePreview() {
-    if (hoverTimer) clearTimeout(hoverTimer);
-    hoverPreview = null;
-  }
-
-  /** 文本悬停全文预览：350ms 延迟；3 行内能显示完的短文本不弹，避免打扰 */
-  function showTextPreview(item: ItemDto, rowEl: HTMLElement) {
-    const text = item.full ?? item.preview;
-    // 约 3 行 ≈ 80 字符，无换行且更短的内容无需预览
-    if (text.length <= 80 && !text.includes("\n")) return;
-    if (textHoverTimer) clearTimeout(textHoverTimer);
-    textHoverTimer = setTimeout(() => {
-      if (!listSectionEl) return;
-      const rowRect = rowEl.getBoundingClientRect();
-      const secRect = listSectionEl.getBoundingClientRect();
-      const MAX_H = 300;
-      // 优先显示在行下方
-      let top = rowRect.bottom - secRect.top + 8;
-      let below = secRect.bottom - 8 - rowRect.bottom;
-      let height = Math.min(MAX_H, Math.max(80, below));
-      if (below < 80) {
-        // 下方空间不足：显示在行上方
-        height = Math.min(MAX_H, Math.max(80, rowRect.top - secRect.top - 16));
-        top = Math.max(8, rowRect.top - secRect.top - height - 8);
-      }
-      textPreview = { text, top, height };
-    }, 350);
-  }
-
-  function hideTextPreview() {
-    if (textHoverTimer) clearTimeout(textHoverTimer);
-    textPreview = null;
-  }
-
-  /** 网格列数：读计算样式，图片 Tab 自适应、文件 Tab 固定 5 列 */
+  /** 网格列数：读计算样式，图片/文件 Tab 均自适应列数 */
   function gridCols(): number {
     if (!gridEl) return 1;
     return getComputedStyle(gridEl).gridTemplateColumns.split(" ").filter(Boolean).length || 1;
@@ -489,14 +399,6 @@
     if (e.key === "Escape") {
       if (ctxMenu) {
         ctxMenu = null;
-        return;
-      }
-      if (textPreview) {
-        hideTextPreview();
-        return;
-      }
-      if (hoverPreview) {
-        hidePreview();
         return;
       }
       getCurrentWindow().hide();
@@ -662,7 +564,7 @@
   {/if}
 
   <!-- 内容区：类型 Tab + 按类型切换布局 -->
-  <div class="content" bind:this={contentEl}>
+  <div class="content">
     <!-- 类型筛选：全部 / 文本 / 图片 / 文件（与搜索叠加） -->
     <div class="kind-tabs">
       {#each kindTabs as tab (tab.k)}
@@ -705,8 +607,6 @@
               title={item.kind === "image"
                 ? `图片 · ${timeLabel(item.created_at)}`
                 : `${item.preview} · ${timeLabel(item.created_at)}`}
-              onmouseenter={(e) => showPreview(item, e.currentTarget as HTMLElement)}
-              onmouseleave={hidePreview}
               onclick={() => paste(item.id)}
               oncontextmenu={(e) => openCtxMenu(e, item)}
               onkeydown={(e) => {
@@ -766,8 +666,6 @@
       onContext={openCtxMenu}
       onTogglePin={togglePin}
       onRemove={remove}
-      onHover={showPreview}
-      onLeave={hidePreview}
     />
         {:else if kindFilter === "files"}
     <GridPanel
@@ -781,8 +679,6 @@
       onContext={openCtxMenu}
       onTogglePin={togglePin}
       onRemove={remove}
-      onHover={showPreview}
-      onLeave={hidePreview}
     />
     {/if}
 
@@ -820,11 +716,7 @@
                   {top}
                   {filter}
                   confirmDeleteId={confirmDeleteId}
-                  onSelect={(el, it) => {
-                    selected = gi;
-                    showTextPreview(it, el);
-                  }}
-                  onLeave={hideTextPreview}
+                  onSelect={() => (selected = gi)}
                   onPaste={(id) => paste(id)}
                   onContext={openCtxMenu}
                   onTogglePin={togglePin}
@@ -842,11 +734,7 @@
                   flow
                   {filter}
                   confirmDeleteId={confirmDeleteId}
-                  onSelect={(el, it) => {
-                    selected = i;
-                    showTextPreview(it, el);
-                  }}
-                  onLeave={hideTextPreview}
+                  onSelect={() => (selected = i)}
                   onPaste={(id) => paste(id)}
                   onContext={openCtxMenu}
                   onTogglePin={togglePin}
@@ -857,25 +745,7 @@
           {/if}
         {/if}
       </main>
-
-      {#if textPreview}
-        <div
-          class="text-preview"
-          style="top: {textPreview.top}px; height: {textPreview.height}px"
-        >
-          <pre>{textPreview.text}</pre>
-        </div>
-      {/if}
     </section>
-    {/if}
-
-    {#if hoverPreview}
-      <div
-        class="img-preview"
-        style="top: {hoverPreview.top}px; height: {hoverPreview.height}px"
-      >
-        <img src="data:image/png;base64,{hoverPreview.src}" alt="预览" />
-      </div>
     {/if}
   </div>
 
@@ -1280,52 +1150,6 @@
   }
   .ctx-menu button.danger {
     color: var(--danger);
-  }
-
-  /* 图片大图预览浮层：高度由 JS 按可用空间计算，图片 contain 适配 */
-  .img-preview {
-    position: absolute;
-    left: 12px;
-    right: 12px;
-    background: var(--bg-soft);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    overflow: hidden;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-    z-index: 10;
-    pointer-events: none;
-    display: flex;
-  }
-  .img-preview img {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-  }
-
-  /* 文本全文预览浮层 */
-  .text-preview {
-    position: absolute;
-    left: 12px;
-    right: 12px;
-    background: var(--bg-soft);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-    z-index: 10;
-    pointer-events: none;
-    overflow: hidden;
-  }
-  .text-preview pre {
-    margin: 0;
-    padding: 10px 12px;
-    height: 100%;
-    overflow: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: inherit;
-    font-size: 12px;
-    line-height: 1.6;
-    color: var(--text);
   }
 
   .empty {
