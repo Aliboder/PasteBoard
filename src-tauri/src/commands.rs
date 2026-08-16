@@ -469,7 +469,9 @@ pub fn get_image(state: State<'_, AppState>, id: i64) -> CmdResult<Option<String
 pub async fn get_file_icon(path: String) -> CmdResult<Option<String>> {
     tauri::async_runtime::spawn_blocking(move || crate::file_icons::file_icon_png(&path))
         .await
-        .map_err(|e| CommandError { message: format!("图标提取任务失败: {e}") })
+        .map_err(|e| CommandError {
+            message: format!("图标提取任务失败: {e}"),
+        })
 }
 
 /// 图片文件缩略图（按文件路径；解码耗时，异步执行）
@@ -477,7 +479,9 @@ pub async fn get_file_icon(path: String) -> CmdResult<Option<String>> {
 pub async fn get_file_thumb(path: String) -> CmdResult<Option<String>> {
     tauri::async_runtime::spawn_blocking(move || crate::file_icons::file_thumb_png(&path))
         .await
-        .map_err(|e| CommandError { message: format!("缩略图生成任务失败: {e}") })
+        .map_err(|e| CommandError {
+            message: format!("缩略图生成任务失败: {e}"),
+        })
 }
 
 /// 图片文件大预览（按文件路径，最长边 1024；解码耗时，异步执行）
@@ -485,7 +489,9 @@ pub async fn get_file_thumb(path: String) -> CmdResult<Option<String>> {
 pub async fn get_file_preview(path: String) -> CmdResult<Option<String>> {
     tauri::async_runtime::spawn_blocking(move || crate::file_icons::file_preview_png(&path))
         .await
-        .map_err(|e| CommandError { message: format!("预览生成任务失败: {e}") })
+        .map_err(|e| CommandError {
+            message: format!("预览生成任务失败: {e}"),
+        })
 }
 
 /// 组装前端视图（缩略图改为前端按需加载，避免列表全量读文件转 base64）

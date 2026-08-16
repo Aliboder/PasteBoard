@@ -26,7 +26,10 @@ fn cache_get_or_insert(
     key: &str,
     compute: impl FnOnce() -> Option<String>,
 ) -> Option<String> {
-    let mut map = cache.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let mut map = cache
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
     if let Some(v) = map.get(key) {
         return v.clone();
     }
