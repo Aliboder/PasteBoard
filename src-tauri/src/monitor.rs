@@ -8,15 +8,15 @@ use crate::state::AppState;
 use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM, HMODULE};
+use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::AddClipboardFormatListener;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, RegisterClassExW,
-    TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW,
-    WM_CLIPBOARDUPDATE,
+    TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
+    WNDCLASSEXW,
 };
-use windows::core::{PCWSTR, PWSTR};
 
 /// 监听器线程持有的应用句柄
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
@@ -62,7 +62,10 @@ fn listener_thread() {
             ..Default::default()
         };
         if RegisterClassExW(&wc) == 0 {
-            log::error!("RegisterClassExW failed, err={}", std::io::Error::last_os_error());
+            log::error!(
+                "RegisterClassExW failed, err={}",
+                std::io::Error::last_os_error()
+            );
             return;
         }
         let hwnd = match CreateWindowExW(
@@ -144,11 +147,11 @@ fn process_clipboard_change() {
     let state = app.state::<AppState>();
 
     // 自身写入守卫：我们写入剪贴板后 300ms 内的变化跳过
-    if state.self_write.swap(false, Ordering::SeqCst) {
-        if now_ms() - state.last_self_write_ms.load(Ordering::SeqCst) < SELF_WRITE_GUARD_MS {
-            log::debug!("skip self write");
-            return;
-        }
+    if state.self_write.swap(false, Ordering::SeqCst)
+        && now_ms() - state.last_self_write_ms.load(Ordering::SeqCst) < SELF_WRITE_GUARD_MS
+    {
+        log::debug!("skip self write");
+        return;
     }
 
     match save_from_clipboard(&state, app) {
@@ -164,10 +167,7 @@ fn process_clipboard_change() {
 }
 
 /// 读取剪贴板并入库；返回 (条目, 是否新增)。重复内容仅刷新时间（changed=false）
-fn save_from_clipboard(
-    state: &AppState,
-    app: &AppHandle,
-) -> Result<Option<(Item, bool)>, DbError> {
+fn save_from_clipboard(state: &AppState, app: &AppHandle) -> Result<Option<(Item, bool)>, DbError> {
     // 1. 类型判定：文件 > 图片 > 文本（文本附带富文本 HTML）
     let (kind, content, html, file_paths, image_data, hash) =
         if let Some(files) = clipboard::read_files() {
@@ -203,17 +203,17 @@ fn save_from_clipboard(
     if let Some(existing_id) = db.find_by_hash(&hash)? {
         db.touch_item(existing_id, now)?;
         if let Some(h) = html {
-            let existing = db.get_item(existing_id)?.ok_or_else(|| {
-                DbError::Sql(rusqlite::Error::QueryReturnedNoRows)
-            })?;
+            let existing = db
+                .get_item(existing_id)?
+                .ok_or_else(|| DbError::Sql(rusqlite::Error::QueryReturnedNoRows))?;
             if existing.html.is_none() {
                 db.set_html(existing_id, Some(h))?;
                 log::info!("upgraded item {existing_id} with html");
             }
         }
-        let item = db.get_item(existing_id)?.ok_or_else(|| {
-            DbError::Sql(rusqlite::Error::QueryReturnedNoRows)
-        })?;
+        let item = db
+            .get_item(existing_id)?
+            .ok_or_else(|| DbError::Sql(rusqlite::Error::QueryReturnedNoRows))?;
         log::debug!("dedup: touch item {}", existing_id);
         return Ok(Some((item, false)));
     }
@@ -276,22 +276,13 @@ fn save_from_clipboard(
 }
 
 /// 组装前端视图；图片缩略图读取后转 base64
+/// 组装前端视图（缩略图由前端按需加载）
 fn item_dto(_state: &AppState, item: &Item) -> Option<ItemDto> {
-    let thumb = if item.kind == ItemKind::Image {
-        item.thumb_path.as_ref().and_then(|p| {
-            std::fs::read(p)
-                .ok()
-                .map(|b| base64_encode(&b))
-        })
-    } else {
-        None
-    };
-    Some(item.to_dto(thumb))
+    Some(item.to_dto(None))
 }
 
 pub fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [

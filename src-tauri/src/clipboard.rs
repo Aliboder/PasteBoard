@@ -15,7 +15,11 @@ static CLIP_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 注册的 "HTML Format" 剪贴板格式编号（每次运行需重新注册）
 fn html_format() -> u32 {
-    unsafe { windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!("HTML Format")) }
+    unsafe {
+        windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
+            "HTML Format"
+        ))
+    }
 }
 
 fn open_clipboard() -> bool {
@@ -35,7 +39,7 @@ pub fn read_text() -> Option<String> {
         return None;
     }
     let result = (|| {
-        if !unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32) }.is_ok() {
+        if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32) }.is_err() {
             return None;
         }
         unsafe {
@@ -69,7 +73,7 @@ pub fn read_html() -> Option<String> {
     }
     let result = (|| {
         let fmt = html_format();
-        if fmt == 0 || !unsafe { IsClipboardFormatAvailable(fmt) }.is_ok() {
+        if fmt == 0 || unsafe { IsClipboardFormatAvailable(fmt) }.is_err() {
             return None;
         }
         unsafe {
@@ -83,7 +87,11 @@ pub fn read_html() -> Option<String> {
             let s = String::from_utf8_lossy(slice);
             let _ = GlobalUnlock(h);
             let s = s.trim_end_matches('\0').to_string();
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         }
     })();
     close_clipboard();
@@ -97,7 +105,7 @@ pub fn read_files() -> Option<Vec<String>> {
         return None;
     }
     let result = (|| {
-        if !unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_ok() {
+        if unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_err() {
             return None;
         }
         unsafe {
@@ -128,10 +136,7 @@ pub fn read_files() -> Option<Vec<String>> {
                     break;
                 }
                 let s = if fwide {
-                    String::from_utf16_lossy(std::slice::from_raw_parts(
-                        start as *const u16,
-                        len,
-                    ))
+                    String::from_utf16_lossy(std::slice::from_raw_parts(start as *const u16, len))
                 } else {
                     String::from_utf8_lossy(std::slice::from_raw_parts(start, len)).to_string()
                 };
@@ -160,25 +165,23 @@ pub fn read_image_rgba() -> Option<(Vec<u8>, u32, u32)> {
     if !open_clipboard() {
         return None;
     }
-    let result = (|| {
-        unsafe {
-            let format = if IsClipboardFormatAvailable(CF_DIBV5.0 as u32).is_ok() {
-                CF_DIBV5.0 as u32
-            } else if IsClipboardFormatAvailable(CF_DIB.0 as u32).is_ok() {
-                CF_DIB.0 as u32
-            } else {
-                return None;
-            };
-            let h = HGLOBAL(GetClipboardData(format).ok()?.0);
-            let ptr = GlobalLock(h) as *const u8;
-            if ptr.is_null() {
-                return None;
-            }
-            let size = GlobalSize(h);
-            let result = decode_dib(ptr, size);
-            let _ = GlobalUnlock(h);
-            result
+    let result = (|| unsafe {
+        let format = if IsClipboardFormatAvailable(CF_DIBV5.0 as u32).is_ok() {
+            CF_DIBV5.0 as u32
+        } else if IsClipboardFormatAvailable(CF_DIB.0 as u32).is_ok() {
+            CF_DIB.0 as u32
+        } else {
+            return None;
+        };
+        let h = HGLOBAL(GetClipboardData(format).ok()?.0);
+        let ptr = GlobalLock(h) as *const u8;
+        if ptr.is_null() {
+            return None;
         }
+        let size = GlobalSize(h);
+        let result = decode_dib(ptr, size);
+        let _ = GlobalUnlock(h);
+        result
     })();
     close_clipboard();
     result
@@ -215,7 +218,7 @@ unsafe fn decode_dib(ptr: *const u8, size: usize) -> Option<(Vec<u8>, u32, u32)>
         }
     };
 
-    let row_stride = ((width as usize * bpp as usize + 31) / 32) * 4;
+    let row_stride = (width as usize * bpp as usize).div_ceil(32) * 4;
     let pixels_off = header_size;
     if pixels_off + row_stride * height as usize > size {
         return None;
@@ -227,7 +230,11 @@ unsafe fn decode_dib(ptr: *const u8, size: usize) -> Option<(Vec<u8>, u32, u32)>
 
     for y in 0..height as usize {
         // 自下而上：内存第一行是图像最后一行
-        let src_y = if top_down { y } else { (height as usize - 1) - y };
+        let src_y = if top_down {
+            y
+        } else {
+            (height as usize - 1) - y
+        };
         let row = data.add(src_y * row_stride);
         for x in 0..width as usize {
             let px = row.add(x * bytes_per_px);
@@ -241,13 +248,13 @@ unsafe fn decode_dib(ptr: *const u8, size: usize) -> Option<(Vec<u8>, u32, u32)>
             rgba.extend_from_slice(&[r, g, b, 255]);
         }
     }
-    Some((rgba, width as u32, height as u32))
+    Some((rgba, width as u32, height))
 }
 
 /// 把 RGBA 编码为 PNG 字节
 pub fn rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())
-        .ok_or("invalid rgba buffer")?;
+    let img =
+        image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or("invalid rgba buffer")?;
     let mut buf = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
         .map_err(|e| e.to_string())?;
@@ -276,7 +283,8 @@ fn build_cf_html(fragment: &str) -> Vec<u8> {
         "<html>\r\n<body>\r\n<!--StartFragment-->{fragment}<!--EndFragment-->\r\n</body>\r\n</html>"
     );
     let header_prefix = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n";
-    let frag_start = header_prefix.len() + html.find("<!--StartFragment-->").unwrap_or(0)
+    let frag_start = header_prefix.len()
+        + html.find("<!--StartFragment-->").unwrap_or(0)
         + "<!--StartFragment-->".len();
     let frag_end = frag_start + fragment.len();
     let end_html = header_prefix.len() + html.len();
@@ -334,7 +342,11 @@ pub fn write_text_rich(text: &str, html: Option<&str>) -> bool {
                 if let Ok(h2) = GlobalAlloc(GMEM_MOVEABLE, payload.len()) {
                     let p2 = GlobalLock(h2);
                     if !p2.is_null() {
-                        std::ptr::copy_nonoverlapping(payload.as_ptr(), p2 as *mut u8, payload.len());
+                        std::ptr::copy_nonoverlapping(
+                            payload.as_ptr(),
+                            p2 as *mut u8,
+                            payload.len(),
+                        );
                         let _ = GlobalUnlock(h2);
                         let fmt = html_format();
                         if fmt != 0 {
@@ -480,7 +492,8 @@ pub fn write_files(paths: &[String]) -> bool {
 
 /// 当前剪贴板格式列表（调试用）
 #[allow(dead_code)]
-pub fn format_names() -> Vec<String> {    let mut out = Vec::new();
+pub fn format_names() -> Vec<String> {
+    let mut out = Vec::new();
     let _guard = CLIP_MUTEX.lock();
     if !open_clipboard() {
         return out;
@@ -512,9 +525,8 @@ mod tests {
     /// 构造带真实字节偏移的 CF_HTML（模拟浏览器复制的内容）
     fn sample_cf_html() -> String {
         let frag = "<b>你好</b>";
-        let html = format!(
-            "<html><body><!--StartFragment-->{frag}<!--EndFragment--></body></html>"
-        );
+        let html =
+            format!("<html><body><!--StartFragment-->{frag}<!--EndFragment--></body></html>");
         let header_prefix = "Version:0.9\r\nStartHTML:0000000105\r\nEndHTML:0000000214\r\nStartFragment:0000000141\r\nEndFragment:0000000168\r\n";
         let start = header_prefix.len() + "<html><body><!--StartFragment-->".len();
         let end = start + frag.len();
@@ -548,12 +560,18 @@ mod tests {
         let s = String::from_utf8(payload).unwrap();
         assert!(s.starts_with("Version:0.9\r\nStartHTML:"));
         // StartFragment 指向的位置必须恰好是 fragment 开头（前 20 字节为标记）
-        let line = s.split("\r\n").find(|l| l.starts_with("StartFragment:")).unwrap();
+        let line = s
+            .split("\r\n")
+            .find(|l| l.starts_with("StartFragment:"))
+            .unwrap();
         let off: usize = line["StartFragment:".len()..].parse().unwrap();
         assert_eq!(&s[off - 20..off], "<!--StartFragment-->");
         assert!(s[off..].starts_with("<b>你好</b>"));
         // EndFragment 指向 fragment 结尾（之后紧跟 EndFragment 标记）
-        let line = s.split("\r\n").find(|l| l.starts_with("EndFragment:")).unwrap();
+        let line = s
+            .split("\r\n")
+            .find(|l| l.starts_with("EndFragment:"))
+            .unwrap();
         let off: usize = line["EndFragment:".len()..].parse().unwrap();
         assert_eq!(&s[off - 7..off], "好</b>");
         assert!(s[off..].starts_with("<!--EndFragment-->"));

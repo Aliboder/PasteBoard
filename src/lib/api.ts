@@ -71,6 +71,10 @@ export async function getImage(id: number): Promise<string | null> {
   return invoke("get_image", { id });
 }
 
+export async function getThumb(id: number): Promise<string | null> {
+  return invoke("get_thumb", { id });
+}
+
 export async function getFileIcon(path: string): Promise<string | null> {
   return invoke("get_file_icon", { path });
 }

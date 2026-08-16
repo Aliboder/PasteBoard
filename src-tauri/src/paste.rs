@@ -7,8 +7,8 @@ use std::sync::atomic::Ordering;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, SetFocus,
-    VIRTUAL_KEY, VK_CONTROL, VK_V,
+    SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    VK_CONTROL, VK_V,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, SendMessageW,
@@ -106,10 +106,9 @@ pub fn write_item_clipboard(state: &AppState, item: &Item) -> Result<(), String>
             None => false,
         },
         ItemKind::Files => {
-            let paths: Vec<String> = serde_json::from_str(
-                item.file_paths.as_deref().unwrap_or("[]"),
-            )
-            .unwrap_or_default();
+            let paths: Vec<String> =
+                serde_json::from_str(item.file_paths.as_deref().unwrap_or("[]"))
+                    .unwrap_or_default();
             if paths.is_empty() {
                 return Err("empty file list".into());
             }
@@ -147,10 +146,7 @@ pub fn paste_item(state: &AppState, id: i64) -> Result<(), String> {
         return Ok(());
     }
     let focus = HWND(focus_hwnd as *mut core::ffi::c_void);
-    let restored = restore_focus(
-        HWND(win_hwnd as *mut core::ffi::c_void),
-        focus,
-    );
+    let restored = restore_focus(HWND(win_hwnd as *mut core::ffi::c_void), focus);
     if !restored {
         return Err("无法还原原窗口焦点，内容已复制到剪贴板，请手动粘贴".into());
     }
@@ -206,8 +202,10 @@ fn send_ctrl_v() {
 }
 
 fn key_input(key: VIRTUAL_KEY, keyup: bool) -> INPUT {
-    let mut ki = KEYBDINPUT::default();
-    ki.wVk = key;
+    let mut ki = KEYBDINPUT {
+        wVk: key,
+        ..Default::default()
+    };
     if keyup {
         ki.dwFlags = KEYEVENTF_KEYUP;
     }

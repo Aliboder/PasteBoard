@@ -20,8 +20,8 @@ pub fn hash_image_rgba(rgba: &[u8], width: u32, height: u32) -> Option<String> {
         return None;
     }
     let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
-    let small = image::DynamicImage::ImageRgba8(img)
-        .resize(32, 32, image::imageops::FilterType::Triangle);
+    let small =
+        image::DynamicImage::ImageRgba8(img).resize(32, 32, image::imageops::FilterType::Triangle);
     Some(sha256_hex(small.as_bytes()))
 }
 

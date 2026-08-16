@@ -108,11 +108,23 @@ AI 自检（编译/类型检查/测试）+ 请用户验收
 ```bash
 npm run tauri dev    # 开发模式（前端热更新，Rust 改动自动重建）
 npm run check        # 前端类型检查（svelte-check）——必跑！
+npm run test         # 前端单元测试（vitest，纯函数逻辑）
 cargo check          # Rust 编译检查
-cargo test           # Rust 单元测试（12 项）
+cargo clippy         # Rust lint——发布前必跑（0 警告）
+cargo fmt --check    # Rust 格式检查（有改动先跑 cargo fmt）
+cargo test           # Rust 单元测试（20 项）
 npm run build        # 前端构建
 npm run tauri build  # 打包（NSIS + MSI + 便携 exe）
 ```
+
+### 前端组件结构（已拆解，勿再堆回 +page.svelte）
+
+- `src/routes/+page.svelte`：主窗口编排（状态/键盘导航/预览浮层/右键菜单）
+- `src/lib/TextRow.svelte`：文本行（虚拟/全量两种模式由父组件切换）
+- `src/lib/GridPanel.svelte`：图片/文件网格
+- `src/lib/SettingsPanel.svelte`：设置面板（含热键录制/清空菜单，自包含状态）
+- `src/lib/FileTile.svelte` / `ImageThumb.svelte`：文件图标/缩略图异步加载
+- `src/lib/utils.ts`：纯函数（timeLabel/splitHighlight 等，vitest 覆盖）
 
 ---
 

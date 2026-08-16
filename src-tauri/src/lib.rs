@@ -44,9 +44,7 @@ impl log::Log for SimpleLogger {
         let line = format!(
             "[{}] {}: {}",
             record.level(),
-            record
-                .module_path()
-                .unwrap_or("pasteboard"),
+            record.module_path().unwrap_or("pasteboard"),
             record.args()
         );
         eprintln!("{line}");
@@ -88,14 +86,22 @@ fn init_logger() {
         .open(&path);
     match file {
         Ok(file) => {
-            if LOGGER.set(SimpleLogger { file: std::sync::Mutex::new(file) }).is_ok() {
+            if LOGGER
+                .set(SimpleLogger {
+                    file: std::sync::Mutex::new(file),
+                })
+                .is_ok()
+            {
                 let _ = log::set_logger(LOGGER.get().unwrap());
                 log::set_max_level(log::LevelFilter::Info);
                 log::info!("pasteboard started, log file: {}", path.display());
             }
         }
         Err(e) => {
-            eprintln!("[PasteBoard] failed to open log file {}: {e}", path.display());
+            eprintln!(
+                "[PasteBoard] failed to open log file {}: {e}",
+                path.display()
+            );
         }
     }
 }
@@ -166,8 +172,7 @@ fn toggle_main_window(app: &AppHandle) {
             let follow_mouse = app
                 .try_state::<AppState>()
                 .and_then(|s| {
-                    s.db
-                        .lock()
+                    s.db.lock()
                         .unwrap()
                         .get_setting("follow_mouse")
                         .ok()

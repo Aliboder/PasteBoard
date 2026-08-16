@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
-    BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DeleteObject, GetDC,
-    GetDIBits, GetObjectW, HGDIOBJ, ReleaseDC,
+    DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
 };
 use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
@@ -16,11 +16,7 @@ static ICON_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::
 
 /// 获取文件类型图标（Shell API，与资源管理器一致），返回 PNG base64
 pub fn file_icon_png(path: &str) -> Option<String> {
-    let ext = path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
     let cache = ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(cached) = cache.lock().unwrap().get(&ext).cloned() {
         return cached;
@@ -101,11 +97,8 @@ unsafe fn extract_icon(path: &str) -> Option<Vec<u8>> {
         }
         let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
         let mut buf = Vec::new();
-        img.write_to(
-            &mut std::io::Cursor::new(&mut buf),
-            image::ImageFormat::Png,
-        )
-        .ok()?;
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .ok()?;
         Some(buf)
     })();
     let _ = DestroyIcon(hicon);

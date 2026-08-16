@@ -1,4 +1,4 @@
-﻿//! Tauri 命令层：前端 invoke 的入口，仅做编排
+//! Tauri 命令层：前端 invoke 的入口，仅做编排
 
 use crate::models::{Item, ItemDto};
 use crate::state::AppState;
@@ -12,13 +12,17 @@ pub struct CommandError {
 
 impl From<rusqlite::Error> for CommandError {
     fn from(e: rusqlite::Error) -> Self {
-        CommandError { message: e.to_string() }
+        CommandError {
+            message: e.to_string(),
+        }
     }
 }
 
 impl From<crate::db::DbError> for CommandError {
     fn from(e: crate::db::DbError) -> Self {
-        CommandError { message: e.to_string() }
+        CommandError {
+            message: e.to_string(),
+        }
     }
 }
 
@@ -68,7 +72,9 @@ pub fn get_history(
             .map(|p| std::path::Path::new(p).exists())
             .unwrap_or(false),
         // 图片 Tab：文件条目仅保留首个文件为图片的
-        crate::models::ItemKind::Files => kind.as_deref() != Some("image") || first_file_is_image(it),
+        crate::models::ItemKind::Files => {
+            kind.as_deref() != Some("image") || first_file_is_image(it)
+        }
         _ => true,
     });
     Ok(items.iter().map(|i| to_dto(&state, i)).collect())
@@ -129,7 +135,9 @@ pub fn copy_item(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
     let item = {
         let db = state.db.lock().unwrap();
         db.get_item(id)
-            .map_err(|e| CommandError { message: e.to_string() })?
+            .map_err(|e| CommandError {
+                message: e.to_string(),
+            })?
             .ok_or(CommandError {
                 message: "item not found".into(),
             })?
@@ -181,7 +189,10 @@ pub struct SettingsDto {
 }
 
 fn get_setting_str(db: &crate::db::Db, key: &str, default: &str) -> String {
-    db.get_setting(key).ok().flatten().unwrap_or_else(|| default.into())
+    db.get_setting(key)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| default.into())
 }
 
 fn set_setting_str(db: &crate::db::Db, key: &str, value: &str) -> Result<(), crate::db::DbError> {
@@ -190,10 +201,7 @@ fn set_setting_str(db: &crate::db::Db, key: &str, value: &str) -> Result<(), cra
 
 /// 读设置
 #[tauri::command]
-pub fn get_settings(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> CmdResult<SettingsDto> {
+pub fn get_settings(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<SettingsDto> {
     use tauri_plugin_autostart::ManagerExt;
     let db = state.db.lock().unwrap();
     Ok(SettingsDto {
@@ -293,7 +301,7 @@ pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> CmdResult<()> {
 /// 保存窗口尺寸（用户调整后记忆）
 #[tauri::command]
 pub fn set_window_size(state: State<'_, AppState>, w: f64, h: f64) -> CmdResult<()> {
-    if !(w > 0.0) || !(h > 0.0) {
+    if w <= 0.0 || h <= 0.0 {
         return Err(CommandError {
             message: "无效尺寸".into(),
         });
@@ -356,14 +364,12 @@ fn dir_size(dir: &std::path::Path) -> u64 {
 #[tauri::command]
 pub fn get_stats(state: State<'_, AppState>) -> CmdResult<StatsDto> {
     let db = state.db.lock().unwrap();
-    let count = |kind: &str| -> i64 {
-        db.count_by_kind(kind).unwrap_or(0)
-    };
+    let count = |kind: &str| -> i64 { db.count_by_kind(kind).unwrap_or(0) };
     let total: i64 = db.count_all().unwrap_or(0);
     let db_path = state.store.root().join("pasteboard.db");
     let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-    let media_size = dir_size(&state.store.root().join("images"))
-        + dir_size(&state.store.root().join("thumbs"));
+    let media_size =
+        dir_size(&state.store.root().join("images")) + dir_size(&state.store.root().join("thumbs"));
     Ok(StatsDto {
         total,
         text: count("text"),
@@ -376,10 +382,7 @@ pub fn get_stats(state: State<'_, AppState>) -> CmdResult<StatsDto> {
 
 /// 恢复默认设置（含热键重新注册）
 #[tauri::command]
-pub fn reset_settings(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> CmdResult<()> {
+pub fn reset_settings(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     let db = state.db.lock().unwrap();
     db.set_setting("max_items", "500")?;
@@ -441,7 +444,9 @@ pub fn get_thumb(state: State<'_, AppState>, id: i64) -> CmdResult<Option<String
     let Some(path) = item.thumb_path else {
         return Ok(None);
     };
-    Ok(std::fs::read(&path).ok().map(|b| crate::monitor::base64_encode(&b)))
+    Ok(std::fs::read(&path)
+        .ok()
+        .map(|b| crate::monitor::base64_encode(&b)))
 }
 
 /// 图片原图 base64（大图预览用，按 id 读取）
@@ -454,7 +459,9 @@ pub fn get_image(state: State<'_, AppState>, id: i64) -> CmdResult<Option<String
     let Some(path) = item.image_path else {
         return Ok(None);
     };
-    Ok(std::fs::read(&path).ok().map(|b| crate::monitor::base64_encode(&b)))
+    Ok(std::fs::read(&path)
+        .ok()
+        .map(|b| crate::monitor::base64_encode(&b)))
 }
 
 /// 文件类型图标（Shell API，按文件路径）
@@ -475,16 +482,44 @@ pub fn get_file_preview(path: String) -> CmdResult<Option<String>> {
     Ok(crate::file_icons::file_preview_png(&path))
 }
 
-/// 组装前端视图（缩略图 base64 内联，MVP 简单方案）
+/// 组装前端视图（缩略图改为前端按需加载，避免列表全量读文件转 base64）
 fn to_dto(_state: &AppState, item: &Item) -> ItemDto {
-    let thumb = if item.kind == crate::models::ItemKind::Image {
-        item.thumb_path.as_ref().and_then(|p| {
-            std::fs::read(p)
-                .ok()
-                .map(|b| crate::monitor::base64_encode(&b))
-        })
-    } else {
-        None
-    };
-    item.to_dto(thumb)
+    item.to_dto(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_item(paths: &[&str]) -> Item {
+        Item {
+            id: 0,
+            kind: crate::models::ItemKind::Files,
+            content: None,
+            html: None,
+            file_paths: Some(serde_json::to_string(paths).unwrap()),
+            image_path: None,
+            thumb_path: None,
+            hash: "h".into(),
+            pinned: false,
+            created_at: 0,
+        }
+    }
+
+    /// 图片 Tab 的文件图片判定（首个文件扩展名）
+    #[test]
+    fn first_file_image_detection() {
+        assert!(first_file_is_image(&file_item(&["C:\\a\\b.png"])));
+        assert!(first_file_is_image(&file_item(&["C:\\a\\B.JPG"]))); // 大小写不敏感
+        assert!(!first_file_is_image(&file_item(&["C:\\a\\b.docx"])));
+        assert!(first_file_is_image(&file_item(&[
+            "C:\\a\\b.png",
+            "C:\\a\\c.pdf"
+        ]))); // 首个为图片
+        assert!(!first_file_is_image(&file_item(&[
+            "C:\\a\\b.pdf",
+            "C:\\a\\c.png"
+        ]))); // 首非图片
+        assert!(!first_file_is_image(&file_item(&[])));
+    }
 }

@@ -5,8 +5,6 @@
     getHistory,
     pinItem,
     deleteItem,
-    clearHistory,
-    clearAllHistory,
     pasteItem,
     copyItem,
     openFileLocation,
@@ -14,45 +12,30 @@
     getImage,
     getFilePreview,
     getSettings,
-    setMaxItems,
-    setTheme,
-    setHotkey,
-    setToggle,
-    setAutostart,
     setWindowSize,
-    openDataDir,
-    getStats,
-    resetSettings,
     onChange,
     type ItemDto,
     type ItemKind,
     type SettingsDto,
-    type StatsDto,
   } from "../lib/api";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import FileTile from "../lib/FileTile.svelte";
+  import TextRow from "../lib/TextRow.svelte";
+  import GridPanel from "../lib/GridPanel.svelte";
+  import SettingsPanel from "../lib/SettingsPanel.svelte";
+  import ImageThumb from "../lib/ImageThumb.svelte";
+  import { PREVIEW_IMAGE_EXTS, splitHighlight, timeLabel } from "../lib/utils";
   import {
     Search,
     X,
     Settings,
     Pin,
     PinOff,
-    Star,
     ExternalLink,
-    Palette,
-    Sliders,
-    Keyboard,
-    History,
-    Wrench,
     Folder,
     Image as ImageIcon,
     ClipboardList,
   } from "lucide-svelte";
-
-  /** 可大预览的图片扩展名（files 类型判断用） */
-  const PREVIEW_IMAGE_EXTS = new Set([
-    "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "avif", "tif", "tiff",
-  ]);
 
   let items: ItemDto[] = $state([]);
   let filter = $state("");
@@ -80,16 +63,60 @@
   let listScrollTop = $state(0);
   let listViewportH = $state(400);
 
-  /** 估算条目行高：按当前列表宽度估算换行数（换行文本一律按 3 行档） */
+  /** 与 .title 一致的字体度量上下文（canvas 测量，惰性创建） */
+  let measureCtx: CanvasRenderingContext2D | null = null;
+  /** 字符宽度缓存（测量结果按字符复用） */
+  const charWidthCache = new Map<string, number>();
+  const TITLE_FONT = "13px system-ui, 'Segoe UI', 'Microsoft YaHei', sans-serif";
+
+  function charWidth(ch: string): number {
+    let w = charWidthCache.get(ch);
+    if (w === undefined) {
+      if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
+      w = measureCtx?.measureText(ch).width ?? 13.5;
+      charWidthCache.set(ch, w);
+    }
+    return w;
+  }
+
+  /** 标题区实际可用宽度：列表宽 - 两侧 padding - 行内 padding - 操作按钮区 - 间隙 */
+  function titleMaxWidth(): number {
+    const w = listEl?.clientWidth ?? 300;
+    return Math.max(80, w - 106);
+  }
+
+  /** 按真实字体度量逐字符模拟换行（\n 强制换行，封顶 3 行 = line-clamp 上限） */
+  function measureLines(text: string, maxWidth: number): number {
+    let w = 0;
+    let lines = 1;
+    for (const ch of text) {
+      if (ch === "\n") {
+        lines += 1;
+        w = 0;
+      } else {
+        const cw = charWidth(ch);
+        w += cw;
+        if (w > maxWidth) {
+          lines += 1;
+          w = cw; // 当前字符成为新行首字符
+        }
+      }
+      if (lines >= 3) return 3;
+    }
+    return Math.min(3, lines);
+  }
+
+  /** 条目行高：按真实字体度量估算行数，三档对应 */
   function rowHeightOf(item: ItemDto): number {
-    const text = item.preview;
-    if (text.includes("\n")) return ROW_H_LONG;
-    const cpl = Math.max(16, Math.floor(((listEl?.clientWidth ?? 300) - 48) / 13.5));
-    const lines = Math.min(3, Math.max(1, Math.ceil(text.length / cpl)));
+    const lines = measureLines(item.preview, titleMaxWidth());
     return lines === 1 ? ROW_H_SHORT : lines === 2 ? ROW_H_MID : ROW_H_LONG;
   }
 
-  const rowHeights = $derived(textItems.map(rowHeightOf));
+  /** 全量渲染阈值：条目数超过时启用虚拟滚动（正常量级走浏览器原生布局，精确无跳变） */
+  const VIRTUAL_THRESHOLD = 600;
+  const USE_VIRTUAL = $derived(textItems.length > VIRTUAL_THRESHOLD);
+
+  const rowHeights = $derived(USE_VIRTUAL ? textItems.map(rowHeightOf) : []);
   /** rowOffsets[i] = 第 0..i 行累计高度（行 i 底边） */
   const rowOffsets = $derived.by(() => {
     const arr: number[] = [];
@@ -135,12 +162,19 @@
   /** 键盘导航时选中行保持可见 */
   $effect(() => {
     const el = listEl;
-    if (!el || selected < 0 || selected >= rowOffsets.length) return;
-    const top = selected === 0 ? 0 : rowOffsets[selected - 1];
-    const h = rowHeights[selected];
-    if (top < el.scrollTop) el.scrollTop = top;
-    else if (top + h > el.scrollTop + el.clientHeight)
-      el.scrollTop = top + h - el.clientHeight;
+    if (!el || selected < 0) return;
+    if (USE_VIRTUAL) {
+      if (selected >= rowOffsets.length) return;
+      const top = selected === 0 ? 0 : rowOffsets[selected - 1];
+      const h = rowHeights[selected];
+      if (top < el.scrollTop) el.scrollTop = top;
+      else if (top + h > el.scrollTop + el.clientHeight)
+        el.scrollTop = top + h - el.clientHeight;
+    } else {
+      // 全量渲染：滚动容器内定位选中行
+      const row = el.querySelectorAll(".row")[selected] as HTMLElement | undefined;
+      row?.scrollIntoView({ block: "nearest" });
+    }
   });
   let selected = $state(-1);
   let loading = $state(true);
@@ -175,20 +209,9 @@
   }
   let settings = $state<SettingsDto | null>(null);
   let showSettings = $state(false);
-  let maxItemsInput = $state("500");
-  let themeSel = $state("dark");
-  let currentHotkey = $state("Ctrl+Shift+V");
-  let hotkeyCapture = $state(false);
-  let hotkeyDraft = $state("");
-  let settingsMsg = $state("");
-  let stats = $state<StatsDto | null>(null);
-  let clearMenuOpen = $state(false);
-  let captureBoxEl: HTMLElement | undefined = $state();
   /** 二次确认：待确认删除的固定条目 id（3 秒未再点复位） */
   let confirmDeleteId = $state<number | null>(null);
   let confirmTimer: ReturnType<typeof setTimeout> | null = null;
-  /** 二次确认：清空全部（含固定） */
-  let confirmClearAll = $state(false);
   /** 网格（图片/文件 Tab）键盘导航选中索引 */
   let gridSelected = $state(-1);
   /** 网格容器引用（当前 Tab 只有一个网格） */
@@ -196,10 +219,6 @@
   /** 右键菜单 */
   let ctxMenu = $state<{ x: number; y: number; item: ItemDto } | null>(null);
 
-  /** 进入录制模式时聚焦录制框 */
-  $effect(() => {
-    if (hotkeyCapture) captureBoxEl?.focus();
-  });
   let hoverPreview = $state<{ src: string; top: number; height: number } | null>(null);
   let textPreview = $state<{ text: string; top: number; height: number } | null>(null);
   /** 悬停预览缓存（上限 30 张，LRU 淘汰，防长时间运行内存膨胀） */
@@ -267,175 +286,18 @@
     strip.scrollLeft += e.deltaY * factor;
   }
 
-  /** 时间显示：今天 → HH:mm，昨天 → 昨天 HH:mm，更早 → MM-DD HH:mm */
-  function timeLabel(ms: number): string {
-    const d = new Date(ms);
-    const now = new Date();
-    const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-    if (d.toDateString() === now.toDateString()) return hhmm;
-    const yesterday = new Date(now);
-    yesterday.setDate(now.getDate() - 1);
-    if (d.toDateString() === yesterday.toDateString()) return `昨天 ${hhmm}`;
-    return `${d.getMonth() + 1}-${d.getDate()} ${hhmm}`;
-  }
-
-  /** 搜索关键字高亮：把文本切成 [普通, 匹配, 普通...] 片段（大小写不敏感，与 SQL LIKE 一致） */
-  function splitHighlight(text: string, keyword: string): { t: string; m: boolean }[] {
-    if (!keyword) return [{ t: text, m: false }];
-    const lower = text.toLowerCase();
-    const kw = keyword.toLowerCase();
-    const out: { t: string; m: boolean }[] = [];
-    let i = 0;
-    while (i < text.length) {
-      const idx = lower.indexOf(kw, i);
-      if (idx < 0) {
-        out.push({ t: text.slice(i), m: false });
-        break;
-      }
-      if (idx > i) out.push({ t: text.slice(i, idx), m: false });
-      out.push({ t: text.slice(idx, idx + kw.length), m: true });
-      i = idx + kw.length;
-    }
-    return out;
-  }
-
   async function openSettings() {
     showSettings = !showSettings;
-    settingsMsg = "";
-    hotkeyCapture = false;
     if (showSettings) {
       settings = await getSettings();
-      maxItemsInput = String(settings.max_items);
-      themeSel = settings.theme;
-      currentHotkey = settings.hotkey;
-      stats = await getStats();
     }
   }
 
-  async function saveSettings() {
-    const n = parseInt(maxItemsInput, 10);
-    if (isNaN(n) || n < 1) {
-      settingsMsg = "请输入大于 0 的数字";
-      return;
-    }
-    await setMaxItems(n);
-    await setTheme(themeSel);
-    applyTheme(themeSel);
-    settingsMsg = "已保存";
-  }
-
-  /** 应用新热键（录制后自动调用） */
-  async function applyHotkey(combo: string) {
-    settingsMsg = "";
-    try {
-      await setHotkey(combo);
-      currentHotkey = combo;
-      hotkeyCapture = false;
-      settingsMsg = `热键已生效：${combo}`;
-    } catch (e) {
-      settingsMsg = typeof e === "string" ? e : (e as { message?: string })?.message ?? "快捷键设置失败";
-    }
-  }
-
-  /** 把 e.code 映射为可识别的键名（不支持的键返回 null） */
-  function mapKey(code: string): string | null {
-    if (/^Key[A-Z]$/.test(code)) return code.slice(3);
-    if (/^Digit[0-9]$/.test(code)) return code.slice(5);
-    if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return code;
-    const map: Record<string, string> = {
-      Space: "Space",
-      Enter: "Enter",
-      Tab: "Tab",
-      Backspace: "Backspace",
-      Delete: "Delete",
-      Home: "Home",
-      End: "End",
-      PageUp: "PageUp",
-      PageDown: "PageDown",
-      Insert: "Insert",
-      ArrowUp: "Up",
-      ArrowDown: "Down",
-      ArrowLeft: "Left",
-      ArrowRight: "Right",
-    };
-    return map[code] ?? null;
-  }
-
-  /** 按键录制：捕获组合键并自动应用 */
-  function onHotkeyKeydown(e: KeyboardEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.key === "Escape") {
-      hotkeyCapture = false;
-      return;
-    }
-    if (e.repeat) return;
-    const mods: string[] = [];
-    if (e.ctrlKey) mods.push("Ctrl");
-    if (e.altKey) mods.push("Alt");
-    if (e.shiftKey) mods.push("Shift");
-    if (e.metaKey) mods.push("Super");
-    const key = mapKey(e.code);
-    if (!key) return; // 忽略不可映射键
-    if (mods.length === 0) {
-      settingsMsg = "快捷键需至少包含一个修饰键（Ctrl / Alt / Shift / Win）";
-      return;
-    }
-    hotkeyDraft = [...mods, key].join("+");
-    applyHotkey(hotkeyDraft);
-  }
-
-  async function toggleSetting(key: string, enabled: boolean) {
-    settingsMsg = "";
-    try {
-      await setToggle(key, enabled ? "on" : "off");
-      if (settings) settings[key as "follow_mouse" | "keep_open" | "always_on_top"] = enabled ? "on" : "off";
-      settingsMsg = "已保存";
-    } catch (e) {
-      settingsMsg = String(e);
-    }
-  }
-
-  async function toggleAutostart(enabled: boolean) {
-    settingsMsg = "";
-    try {
-      await setAutostart(enabled);
-      if (settings) settings.autostart = enabled;
-      settingsMsg = enabled ? "已开启开机自启" : "已关闭开机自启";
-    } catch (e) {
-      settingsMsg = String(e);
-    }
-  }
-
-  async function openDataDirectory() {
-    settingsMsg = "";
-    try {
-      await openDataDir();
-    } catch (e) {
-      settingsMsg = String(e);
-    }
-  }
-
-  function fmtSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
-  }
-
-  async function refreshStats() {
-    stats = await getStats();
-  }
-
-  async function doReset() {
-    settingsMsg = "";
-    try {
-      await resetSettings();
-      await refreshSettings();
-      await openSettings();
-      settingsMsg = "已恢复默认设置";
-    } catch (e) {
-      settingsMsg = String(e);
-    }
+  /** 设置面板操作后：刷新列表、设置与主题（清空/恢复默认后调用） */
+  async function onSettingsChanged() {
+    await reload();
+    settings = await getSettings();
+    if (settings) applyTheme(settings.theme);
   }
 
   /** 刷新设置并应用主题（聚焦时调用） */
@@ -492,31 +354,6 @@
     confirmDeleteId = null;
     await deleteItem(item.id);
     await reload();
-  }
-
-  /** 清空历史（设置面板二级菜单） */
-  async function clearUnpinned() {
-    clearMenuOpen = false;
-    const n = await clearHistory();
-    await reload();
-    await refreshStats();
-    settingsMsg = `已清空 ${n} 条非固定历史`;
-  }
-
-  /** 清空全部（含固定）：需二次确认 */
-  async function clearAllItems() {
-    if (!confirmClearAll) {
-      confirmClearAll = true;
-      settingsMsg = "⚠️ 再点一次确认清空全部（含固定）";
-      setTimeout(() => (confirmClearAll = false), 3000);
-      return;
-    }
-    confirmClearAll = false;
-    clearMenuOpen = false;
-    const n = await clearAllHistory();
-    await reload();
-    await refreshStats();
-    settingsMsg = `已清空全部 ${n} 条历史`;
   }
 
   async function paste(id: number) {
@@ -649,8 +486,6 @@
 
   /** 全局键盘：↑↓ 选择、Enter 粘贴、Esc 关闭、数字 1~9 快捷粘贴、Delete 删除 */
   function globalKeydown(e: KeyboardEvent) {
-    // 快捷键录制期间由录制框独占键盘
-    if (hotkeyCapture) return;
     if (e.key === "Escape") {
       if (ctxMenu) {
         ctxMenu = null;
@@ -819,169 +654,11 @@
   </header>
 
   {#if showSettings}
-    <section class="settings-panel">
-      <!-- 外观 -->
-      <div class="sp-section">
-        <div class="sp-title">
-          <Palette size={12} />
-          外观
-        </div>
-        <div class="sp-row">
-          <span class="sp-label">主题</span>
-          <select bind:value={themeSel}>
-            <option value="dark">深色</option>
-            <option value="light">浅色</option>
-            <option value="system">跟随系统</option>
-          </select>
-          <button class="btn small primary" onclick={saveSettings}>保存</button>
-        </div>
-      </div>
-
-      <!-- 行为 -->
-      <div class="sp-section">
-        <div class="sp-title">
-          <Sliders size={12} />
-          行为
-        </div>
-        <label class="switch-row">
-          <span>唤起跟随鼠标</span>
-          <input
-            type="checkbox"
-            checked={settings?.follow_mouse === "on"}
-            onchange={(e) => toggleSetting("follow_mouse", (e.currentTarget as HTMLInputElement).checked)}
-          />
-          <span class="switch"></span>
-        </label>
-        <label class="switch-row">
-          <span>粘贴后保持打开</span>
-          <input
-            type="checkbox"
-            checked={settings?.keep_open === "on"}
-            onchange={(e) => toggleSetting("keep_open", (e.currentTarget as HTMLInputElement).checked)}
-          />
-          <span class="switch"></span>
-        </label>
-        <label class="switch-row">
-          <span>主窗口置顶</span>
-          <input
-            type="checkbox"
-            checked={settings?.always_on_top === "on"}
-            onchange={(e) => toggleSetting("always_on_top", (e.currentTarget as HTMLInputElement).checked)}
-          />
-          <span class="switch"></span>
-        </label>
-        <label class="switch-row">
-          <span>开机自启</span>
-          <input
-            type="checkbox"
-            checked={settings?.autostart ?? false}
-            onchange={(e) => toggleAutostart((e.currentTarget as HTMLInputElement).checked)}
-          />
-          <span class="switch"></span>
-        </label>
-      </div>
-
-      <!-- 快捷键 -->
-      <div class="sp-section">
-        <div class="sp-title">
-          <Keyboard size={12} />
-          全局快捷键
-        </div>
-        {#if !hotkeyCapture}
-          <div class="sp-row">
-            <kbd class="hotkey-chip">{currentHotkey}</kbd>
-            <button class="btn small" onclick={() => (hotkeyCapture = true)}>修改</button>
-            <span class="sp-msg">{settingsMsg}</span>
-          </div>
-        {:else}
-          <div
-            class="capture-box"
-            role="button"
-            tabindex="0"
-            bind:this={captureBoxEl}
-            onkeydown={onHotkeyKeydown}
-            onblur={() => {
-              if (hotkeyCapture) hotkeyCapture = false;
-            }}
-          >
-            <span class="capture-hint">请按下新的快捷键组合（需含 Ctrl/Alt/Shift/Win，Esc 取消）</span>
-            <strong class="capture-value">{hotkeyDraft || "…"}</strong>
-            <span class="capture-msg">{settingsMsg}</span>
-          </div>
-        {/if}
-      </div>
-
-      <!-- 历史 -->
-      <div class="sp-section">
-        <div class="sp-title">
-          <History size={12} />
-          历史
-        </div>
-        <div class="sp-row">
-          <span class="sp-label">上限</span>
-          <input
-            class="num-input"
-            type="number"
-            min="1"
-            max="100000"
-            bind:value={maxItemsInput}
-            onkeydown={(e) => {
-              if (e.key === "Enter") saveSettings();
-            }}
-          />
-          <span class="sp-unit">条</span>
-          <button class="btn small primary" onclick={saveSettings}>保存</button>
-        </div>
-        {#if stats}
-          <p class="sp-stats">
-            共 {stats.total} 条（文本 {stats.text} · 图片 {stats.image} · 文件 {stats.files}）
-            <br />
-            数据库 {fmtSize(stats.db_size)} · 图片文件 {fmtSize(stats.media_size)}
-          </p>
-        {/if}
-        <div class="menu-wrap">
-          <button class="btn small danger" onclick={() => (clearMenuOpen = !clearMenuOpen)}>
-            清空历史
-            <span class="caret">▾</span>
-          </button>
-          {#if clearMenuOpen}
-            <div
-              class="menu-backdrop"
-              role="presentation"
-              onclick={() => (clearMenuOpen = false)}
-              onkeydown={() => {}}
-            ></div>
-            <div class="menu">
-              <button onclick={clearUnpinned}>清空非固定历史（保留固定）</button>
-              <button
-                class="danger"
-                class:confirm={confirmClearAll}
-                onclick={clearAllItems}
-              >
-                {confirmClearAll ? "⚠️ 确认清空全部！" : "清空全部历史（含固定）"}
-              </button>
-            </div>
-          {/if}
-        </div>
-      </div>
-
-      <!-- 数据与维护 -->
-      <div class="sp-section">
-        <div class="sp-title">
-          <Wrench size={12} />
-          数据与维护
-        </div>
-        <div class="sp-row">
-          <button class="btn small" onclick={openDataDirectory}>打开数据目录</button>
-          <button class="btn small danger" onclick={doReset}>恢复默认设置</button>
-        </div>
-      </div>
-
-      <p class="sp-hint">
-        快捷键格式：<code>Ctrl+Shift+V</code>、<code>Alt+Q</code> 等<br />
-        数据目录：<code>%APPDATA%\com.aliboder.pasteboard</code>（删除图片文件后条目自动隐藏）
-      </p>
-    </section>
+    <SettingsPanel
+      {settings}
+      onApplyTheme={applyTheme}
+      onCleared={onSettingsChanged}
+    />
   {/if}
 
   <!-- 内容区：类型 Tab + 按类型切换布局 -->
@@ -1037,13 +714,7 @@
               }}
             >
               {#if item.kind === "image"}
-                {#if item.thumb}
-                  <img src="data:image/png;base64,{item.thumb}" alt="图片" />
-                {:else}
-                  <span class="strip-placeholder">
-                    <ImageIcon size={16} />
-                  </span>
-                {/if}
+                <ImageThumb id={item.id} />
               {:else}
                 <FileTile path={item.preview} name={fileName(item)} />
               {/if}
@@ -1083,177 +754,36 @@
         </div>
       {/if}
     </section>
-    {:else if kindFilter === "image"}
-    <!-- 图片 Tab：纵向网格，充分利用空间 -->
-    <section class="grid-section">
-      <div class="section-header">
-        <span class="section-title">
-          <ImageIcon size={12} />
-          图片
-        </span>
-        <span class="section-count">{topItems.length} 条</span>
-      </div>
-      {#if topItems.length === 0}
-        <p class="strip-empty">暂无图片历史</p>
-      {:else}
-        <div class="grid" bind:this={gridEl}>
-          {#each topItems as item, gi (item.id)}
-            <div
-              class="grid-item"
-              class:pinned={item.pinned}
-              class:selected={gi === gridSelected}
-              role="option"
-              aria-selected={gi === gridSelected}
-              tabindex="-1"
-              title={item.kind === "image"
-                ? `图片 · ${timeLabel(item.created_at)}`
-                : `${item.preview} · ${timeLabel(item.created_at)}`}
-              onmouseenter={(e) => {
-                gridSelected = gi;
-                showPreview(item, e.currentTarget as HTMLElement);
-              }}
-              onmouseleave={hidePreview}
-              onclick={() => paste(item.id)}
-              oncontextmenu={(e) => openCtxMenu(e, item)}
-              onkeydown={(e) => {
-                if (e.key === "Enter") paste(item.id);
-              }}
-            >
-              {#if item.kind === "image"}
-                {#if item.thumb}
-                  <img src="data:image/png;base64,{item.thumb}" alt="图片" draggable="false" />
-                {:else}
-                  <span class="strip-placeholder">
-                    <ImageIcon size={16} />
-                  </span>
-                {/if}
-              {:else}
-                <!-- 复制的图片文件：图标/缩略图 + 文件名（竖排） -->
-                <div class="grid-file">
-                  <FileTile path={item.preview} name={fileName(item)} />
-                </div>
-              {/if}
-              {#if item.pinned}
-                <span class="grid-pin-badge">
-                  <Star size={11} fill="currentColor" />
-                </span>
-              {/if}
-              <span class="grid-time">{timeLabel(item.created_at)}</span>
-              <div class="grid-actions">
-                <button
-                  class="icon-btn mini {item.pinned ? 'active' : ''}"
-                  title={item.pinned ? "取消固定" : "固定"}
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    togglePin(item);
-                  }}
-                >
-                  {#if item.pinned}
-                    <Pin size={11} fill="currentColor" />
-                  {:else}
-                    <PinOff size={11} />
-                  {/if}
-                </button>
-                <button
-                  class="icon-btn mini danger"
-                  class:confirm={confirmDeleteId === item.id}
-                  title={confirmDeleteId === item.id ? "再点一次确认删除" : "删除"}
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    remove(item);
-                  }}
-                >
-                  {#if confirmDeleteId === item.id}
-                    <span class="confirm-txt">确认</span>
-                  {:else}
-                    <X size={11} />
-                  {/if}
-                </button>
-              </div>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </section>
-    {:else if kindFilter === "files"}
-    <!-- 文件 Tab：网格形式，图片文件显示缩略图，其余显示系统图标 -->
-    <section class="grid-section">
-      <div class="section-header">
-        <span class="section-title">
-          <Folder size={12} />
-          文件
-        </span>
-        <span class="section-count">{topItems.length} 条</span>
-      </div>
-      {#if topItems.length === 0}
-        <p class="strip-empty">暂无文件历史</p>
-      {:else}
-        <div class="grid grid-5" bind:this={gridEl}>
-          {#each topItems as item, gi (item.id)}
-            <div
-              class="grid-item"
-              class:pinned={item.pinned}
-              class:selected={gi === gridSelected}
-              role="option"
-              aria-selected={gi === gridSelected}
-              tabindex="-1"
-              title={`${item.preview} · ${timeLabel(item.created_at)}`}
-              onmouseenter={(e) => {
-                gridSelected = gi;
-                showPreview(item, e.currentTarget as HTMLElement);
-              }}
-              onmouseleave={hidePreview}
-              onclick={() => paste(item.id)}
-              oncontextmenu={(e) => openCtxMenu(e, item)}
-              onkeydown={(e) => {
-                if (e.key === "Enter") paste(item.id);
-              }}
-            >
-              <div class="grid-file">
-                <FileTile path={item.preview} name={fileName(item)} />
-              </div>
-              {#if item.pinned}
-                <span class="grid-pin-badge">
-                  <Star size={11} fill="currentColor" />
-                </span>
-              {/if}
-              <span class="grid-time">{timeLabel(item.created_at)}</span>
-              <div class="grid-actions">
-                <button
-                  class="icon-btn mini {item.pinned ? 'active' : ''}"
-                  title={item.pinned ? "取消固定" : "固定"}
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    togglePin(item);
-                  }}
-                >
-                  {#if item.pinned}
-                    <Pin size={11} fill="currentColor" />
-                  {:else}
-                    <PinOff size={11} />
-                  {/if}
-                </button>
-                <button
-                  class="icon-btn mini danger"
-                  class:confirm={confirmDeleteId === item.id}
-                  title={confirmDeleteId === item.id ? "再点一次确认删除" : "删除"}
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    remove(item);
-                  }}
-                >
-                  {#if confirmDeleteId === item.id}
-                    <span class="confirm-txt">确认</span>
-                  {:else}
-                    <X size={11} />
-                  {/if}
-                </button>
-              </div>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </section>
+        {:else if kindFilter === "image"}
+    <GridPanel
+      items={topItems}
+      kind="image"
+      gridSelected={gridSelected}
+      confirmDeleteId={confirmDeleteId}
+      bindGridEl={(el) => (gridEl = el)}
+      onSelect={(gi) => (gridSelected = gi)}
+      onPaste={(id) => paste(id)}
+      onContext={openCtxMenu}
+      onTogglePin={togglePin}
+      onRemove={remove}
+      onHover={showPreview}
+      onLeave={hidePreview}
+    />
+        {:else if kindFilter === "files"}
+    <GridPanel
+      items={topItems}
+      kind="files"
+      gridSelected={gridSelected}
+      confirmDeleteId={confirmDeleteId}
+      bindGridEl={(el) => (gridEl = el)}
+      onSelect={(gi) => (gridSelected = gi)}
+      onPaste={(id) => paste(id)}
+      onContext={openCtxMenu}
+      onTogglePin={togglePin}
+      onRemove={remove}
+      onHover={showPreview}
+      onLeave={hidePreview}
+    />
     {/if}
 
     {#if kindFilter === "" || kindFilter === "text"}
@@ -1278,83 +808,53 @@
             {filter ? "没有匹配的文本" : "暂无文本历史\n复制文字试试"}
           </p>
         {:else}
-          <div class="list-inner" style="height: {totalHeight}px">
-            {#each visibleTextItems as item, vi (item.id)}
-              {@const gi = viewStart + vi}
-              {@const top = gi === 0 ? 0 : rowOffsets[gi - 1]}
-              <div
-                class="row {item.kind}"
-                class:selected={gi === selected}
-                class:pinned={item.pinned}
-                style="top: {top}px"
-                role="option"
-                aria-selected={gi === selected}
-                tabindex="-1"
-                onmouseenter={(e) => {
-                  selected = gi;
-                  showTextPreview(item, e.currentTarget as HTMLElement);
-                }}
-                onmouseleave={hideTextPreview}
-                onclick={() => paste(item.id)}
-                oncontextmenu={(e) => openCtxMenu(e, item)}
-                onkeydown={(e) => {
-                  if (e.key === "Enter") paste(item.id);
-                }}
-              >
-              <div class="meta">
-                <span class="title">
-                  {#if item.pinned}
-                    <Star size={11} fill="currentColor" class="pin-star" />
-                  {/if}
-                  {#if filter}
-                    {#each splitHighlight(item.preview, filter) as part, pi (pi)}
-                      {#if part.m}
-                        <mark class="hl">{part.t}</mark>
-                      {:else}
-                        {part.t}
-                      {/if}
-                    {/each}
-                  {:else}
-                    {item.preview}
-                  {/if}
-                </span>
-                <span class="time">{timeLabel(item.created_at)}</span>
-              </div>
-
-                <div class="actions">
-                  <button
-                    class="icon-btn {item.pinned ? 'active' : ''}"
-                    title={item.pinned ? "取消固定" : "固定"}
-                    onclick={(e) => {
-                      e.stopPropagation();
-                      togglePin(item);
-                    }}
-                  >
-                    {#if item.pinned}
-                      <Pin size={13} fill="currentColor" />
-                    {:else}
-                      <PinOff size={13} />
-                    {/if}
-                  </button>
-                  <button
-                    class="icon-btn danger"
-                    class:confirm={confirmDeleteId === item.id}
-                    title={confirmDeleteId === item.id ? "再点一次确认删除" : "删除"}
-                    onclick={(e) => {
-                      e.stopPropagation();
-                      remove(item);
-                    }}
-                  >
-                    {#if confirmDeleteId === item.id}
-                      <span class="confirm-txt">确认</span>
-                    {:else}
-                      <X size={13} />
-                    {/if}
-                  </button>
-                </div>
-              </div>
-            {/each}
-          </div>
+          {#if USE_VIRTUAL}
+            <div class="list-inner virtual" style="height: {totalHeight}px">
+              {#each visibleTextItems as item, vi (item.id)}
+                {@const gi = viewStart + vi}
+                {@const top = gi === 0 ? 0 : rowOffsets[gi - 1]}
+                <TextRow
+                  {item}
+                  index={gi}
+                  selected={gi === selected}
+                  {top}
+                  {filter}
+                  confirmDeleteId={confirmDeleteId}
+                  onSelect={(el, it) => {
+                    selected = gi;
+                    showTextPreview(it, el);
+                  }}
+                  onLeave={hideTextPreview}
+                  onPaste={(id) => paste(id)}
+                  onContext={openCtxMenu}
+                  onTogglePin={togglePin}
+                  onRemove={remove}
+                />
+              {/each}
+            </div>
+          {:else}
+            <div class="list-inner flow">
+              {#each textItems as item, i (item.id)}
+                <TextRow
+                  {item}
+                  index={i}
+                  selected={i === selected}
+                  flow
+                  {filter}
+                  confirmDeleteId={confirmDeleteId}
+                  onSelect={(el, it) => {
+                    selected = i;
+                    showTextPreview(it, el);
+                  }}
+                  onLeave={hideTextPreview}
+                  onPaste={(id) => paste(id)}
+                  onContext={openCtxMenu}
+                  onTogglePin={togglePin}
+                  onRemove={remove}
+                />
+              {/each}
+            </div>
+          {/if}
         {/if}
       </main>
 
@@ -1539,264 +1039,13 @@
     color: var(--text);
   }
   .icon-btn.active {
-    color: var(--star);
+    color: var(--accent);
   }
   .icon-btn.danger:hover {
     color: var(--danger);
     background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
 
-  /* 设置面板（内联，分区排版） */
-  .settings-panel {
-    margin: 0 10px 8px;
-    padding: 12px 14px;
-    background: var(--bg-soft);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 12px;
-    max-height: 62%;
-    overflow-y: auto;
-  }
-  .sp-section {
-    padding: 8px 0;
-  }
-  .sp-section + .sp-section {
-    border-top: 1px solid var(--border);
-  }
-  .sp-title {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.4px;
-    color: var(--text-dim);
-    margin-bottom: 8px;
-  }
-  .sp-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .sp-label {
-    color: var(--text);
-    min-width: 40px;
-  }
-  .sp-unit {
-    color: var(--text-dim);
-  }
-  .sp-stats {
-    margin: 8px 0;
-    color: var(--text-dim);
-    font-size: 11.5px;
-    line-height: 1.7;
-  }
-  .sp-msg {
-    color: var(--accent);
-    margin-left: auto;
-  }
-  .sp-hint {
-    margin: 2px 0 0;
-    padding-top: 8px;
-    border-top: 1px solid var(--border);
-    color: var(--text-dim);
-    font-size: 11px;
-    line-height: 1.7;
-  }
-  .sp-hint code {
-    background: var(--bg);
-    padding: 1px 5px;
-    border-radius: 4px;
-    font-size: 10.5px;
-  }
-
-  .settings-panel select,
-  .settings-panel input[type="number"] {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    color: var(--text);
-    padding: 5px 9px;
-    font-size: 12px;
-    outline: none;
-    font-family: inherit;
-  }
-  .settings-panel select:focus,
-  .settings-panel input[type="number"]:focus {
-    border-color: var(--accent);
-  }
-  .num-input {
-    width: 64px;
-  }
-
-  /* 快捷键显示与录制 */
-  .hotkey-chip {
-    background: var(--bg);
-    border: 1px solid var(--border-strong);
-    border-radius: 6px;
-    padding: 4px 10px;
-    font-family: Consolas, monospace;
-    font-size: 12px;
-    color: var(--accent);
-  }
-  .capture-box {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    background: var(--bg);
-    border: 1px dashed var(--accent);
-    border-radius: 8px;
-    padding: 10px 12px;
-    outline: none;
-  }
-  .capture-box:focus {
-    box-shadow: 0 0 0 3px var(--accent-soft);
-  }
-  .capture-hint {
-    color: var(--text-dim);
-    font-size: 11px;
-  }
-  .capture-value {
-    font-family: Consolas, monospace;
-    font-size: 15px;
-    color: var(--accent);
-  }
-  .capture-msg {
-    color: var(--danger);
-    font-size: 11px;
-  }
-
-  /* 按钮 */
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--text);
-    font-size: 11.5px;
-    padding: 4px 11px;
-    border-radius: 7px;
-    cursor: pointer;
-    transition: background 0.12s, border-color 0.12s;
-    font-family: inherit;
-  }
-  .btn:hover {
-    background: var(--bg-hover);
-    border-color: var(--border-strong);
-  }
-  .btn.primary {
-    background: var(--accent);
-    border-color: transparent;
-    color: #10121a;
-    font-weight: 600;
-  }
-  .btn.primary:hover {
-    filter: brightness(1.08);
-  }
-  .btn.danger {
-    color: var(--danger);
-    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
-  }
-  .btn.danger:hover {
-    background: color-mix(in srgb, var(--danger) 12%, transparent);
-  }
-
-  /* 开关（自定义 switch） */
-  .switch-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 5px 0;
-    color: var(--text);
-    cursor: pointer;
-    user-select: none;
-  }
-  .switch-row input {
-    display: none;
-  }
-  .switch {
-    width: 34px;
-    height: 18px;
-    border-radius: 99px;
-    background: var(--border-strong);
-    position: relative;
-    flex-shrink: 0;
-    transition: background 0.15s;
-  }
-  .switch::after {
-    content: "";
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: #ffffff;
-    transition: transform 0.15s;
-  }
-  .switch-row input:checked + .switch {
-    background: var(--accent);
-  }
-  .switch-row input:checked + .switch::after {
-    transform: translateX(16px);
-  }
-
-  /* 清空历史二级菜单 */
-  .menu-wrap {
-    position: relative;
-    margin-top: 4px;
-  }
-  .caret {
-    font-size: 10px;
-    opacity: 0.8;
-  }
-  .menu-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 40;
-  }
-  .menu {
-    position: absolute;
-    left: 0;
-    top: calc(100% + 4px);
-    z-index: 41;
-    background: var(--bg-soft);
-    border: 1px solid var(--border-strong);
-    border-radius: 9px;
-    box-shadow: var(--shadow);
-    overflow: hidden;
-    min-width: 200px;
-    padding: 4px;
-  }
-  .menu button {
-    display: block;
-    width: 100%;
-    text-align: left;
-    padding: 7px 10px;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text);
-    font-size: 12px;
-    cursor: pointer;
-    font-family: inherit;
-  }
-  .menu button:hover {
-    background: var(--bg-hover);
-  }
-  .menu button.danger {
-    color: var(--danger);
-  }
-  .menu button.danger.confirm {
-    background: var(--danger);
-    color: #fff;
-    font-weight: 700;
-  }
 
   /* 内容区：上横向区 + 下文本区 */
   .content {
@@ -1875,11 +1124,6 @@
     transform: translateY(-1px);
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
   }
-  .strip-item img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
   .strip-placeholder {
     color: var(--text-dim);
     font-size: 11px;
@@ -1927,114 +1171,6 @@
     text-align: center;
     color: var(--text-dim);
     font-size: 12px;
-  }
-
-  /* 图片 Tab：纵向网格 */
-  .grid-section {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    padding: 2px 10px 6px;
-  }
-  .grid {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-    gap: 8px;
-    align-content: start;
-    padding: 2px 0 8px;
-  }
-  .grid::-webkit-scrollbar {
-    width: 6px;
-  }
-  .grid::-webkit-scrollbar-thumb {
-    background: var(--border);
-    border-radius: 3px;
-  }
-  .grid-5 {
-    grid-template-columns: repeat(5, 1fr);
-  }
-  .grid-item {
-    position: relative;
-    aspect-ratio: 1;
-    border-radius: 9px;
-    overflow: hidden;
-    background: var(--bg-soft);
-    border: 1px solid var(--border);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: border-color 0.12s, transform 0.12s, box-shadow 0.12s;
-  }
-  .grid-item img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-  .grid-item:hover {
-    border-color: var(--accent);
-    transform: translateY(-1px);
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-  }
-  .grid-item.pinned {
-    box-shadow: inset 0 0 0 1px var(--accent);
-  }
-  .grid-item.selected {
-    box-shadow: inset 0 0 0 2px var(--accent);
-    border-color: var(--accent);
-  }
-  .grid-time {
-    position: absolute;
-    right: 3px;
-    top: 3px;
-    font-size: 8.5px;
-    line-height: 1.3;
-    color: #fff;
-    background: rgba(0, 0, 0, 0.45);
-    padding: 1px 4px;
-    border-radius: 4px;
-    font-family: "Cascadia Mono", Consolas, monospace;
-    pointer-events: none;
-    transition: opacity 0.12s;
-  }
-  /* 悬停时时间让位给右上角操作按钮 */
-  .grid-item:hover .grid-time {
-    opacity: 0;
-  }
-  .grid-pin-badge {
-    position: absolute;
-    top: 4px;
-    left: 4px;
-    color: var(--accent);
-    display: flex;
-    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
-    pointer-events: none;
-  }
-  .grid-file {
-    width: 100%;
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 2px;
-    padding: 4px;
-  }
-  .grid-actions {
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    display: flex;
-    gap: 2px;
-    opacity: 0;
-    transition: opacity 0.12s;
-  }
-  .grid-item:hover .grid-actions {
-    opacity: 1;
   }
 
   /* 下方：文本列表 */
@@ -2101,25 +1237,7 @@
     font-weight: 600;
   }
 
-  /* 固定条目视觉：星标 + 主题色左边条 + 微弱底色 */
-  .pin-star {
-    color: var(--accent);
-    margin-right: 4px;
-    vertical-align: -1px;
-  }
-  .row.pinned {
-    background: color-mix(in srgb, var(--accent) 7%, transparent);
-  }
-  .row.pinned::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 8px;
-    bottom: 8px;
-    width: 2px;
-    border-radius: 2px;
-    background: var(--accent);
-  }
+  /* 固定条目视觉：横条卡片描边 */
   .strip-item.pinned {
     box-shadow: inset 0 0 0 1px var(--accent);
   }
@@ -2162,100 +1280,6 @@
   }
   .ctx-menu button.danger {
     color: var(--danger);
-  }
-
-  .row {
-    position: absolute;
-    left: 0;
-    right: 0;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 7px 10px;
-    border-radius: 9px;
-    border: 1px solid var(--border-strong);
-    cursor: pointer;
-    transition: background 0.12s, border-color 0.12s;
-  }
-  .row:hover {
-    background: var(--bg-hover);
-    border-color: var(--accent);
-  }
-  .row.selected {
-    background: var(--accent-soft);
-    border-color: var(--accent);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
-  }
-
-  .thumb-wrap {
-    width: 56px;
-    height: 40px;
-    flex-shrink: 0;
-    border-radius: 6px;
-    overflow: hidden;
-    background: var(--bg-soft);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .thumb-wrap img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-  .thumb-placeholder {
-    color: var(--text-dim);
-    font-size: 11px;
-  }
-
-  .meta {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-  }
-  .title {
-    color: var(--text);
-    font-size: 13px;
-    line-height: 1.5;
-    /* 超过 3 行折叠省略；不足 3 行按实际行数渲染（自适应高度） */
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    word-break: break-word;
-  }
-  .time {
-    color: var(--text-dim);
-    font-size: 10.5px;
-    font-family: "Cascadia Mono", Consolas, monospace;
-    letter-spacing: 0.2px;
-    opacity: 0.85;
-  }
-  /* 搜索关键字高亮 */
-  .hl {
-    background: color-mix(in srgb, var(--accent) 28%, transparent);
-    color: var(--accent);
-    border-radius: 3px;
-    padding: 0 1px;
-  }
-
-  .actions {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    opacity: 0;
-    transition: opacity 0.12s;
-  }
-  .row:hover .actions,
-  .row.selected .actions {
-    opacity: 1;
-  }
-  .actions .icon-btn {
-    width: 22px;
-    height: 22px;
   }
 
   /* 图片大图预览浮层：高度由 JS 按可用空间计算，图片 contain 适配 */

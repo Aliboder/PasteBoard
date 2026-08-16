@@ -1,7 +1,7 @@
-﻿//! SQLite 存储层：条目与设置读写、固定、上限清理
+//! SQLite 存储层：条目与设置读写、固定、上限清理
 
 use crate::models::{Item, ItemKind};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 
 pub const DEFAULT_MAX_ITEMS: i64 = 500;
 
@@ -41,7 +41,8 @@ impl Db {
 
     fn init(&self) -> Result<(), DbError> {
         // WAL：监听线程高频写库时提升并发，崩溃时更安全（-wal/-shm 文件伴随 db 生成）
-        self.conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
+        self.conn
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS items (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,14 +62,25 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_items_pinned ON items(pinned);",
         )?;
-        // 迁移：v0.3.0 及更早的库没有 html 列（富文本支持）
-        let cols = self
-            .conn
-            .prepare("PRAGMA table_info(items)")?
-            .query_map([], |r| r.get::<_, String>(1))?
-            .collect::<Result<Vec<_>, _>>()?;
-        if !cols.iter().any(|c| c == "html") {
-            self.conn.execute_batch("ALTER TABLE items ADD COLUMN html TEXT")?;
+        // 版本化迁移：schema_version 在 settings 表中，缺失视为 0（旧库）
+        let version: i64 = self
+            .get_setting("schema_version")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if version < 1 {
+            // v1：富文本列（0.4.0 引入）。列探测保证幂等，兼容从未写入版本的库
+            let cols = self
+                .conn
+                .prepare("PRAGMA table_info(items)")?
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            if !cols.iter().any(|c| c == "html") {
+                self.conn
+                    .execute_batch("ALTER TABLE items ADD COLUMN html TEXT")?;
+            }
+            self.set_setting("schema_version", "1")?;
         }
         Ok(())
     }
@@ -94,7 +106,9 @@ impl Db {
         );
         match result {
             Ok(_) => Ok(Some(self.conn.last_insert_rowid())),
-            Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
                 Ok(None) // hash 唯一冲突 → 已存在
             }
             Err(e) => Err(DbError::Sql(e)),
@@ -125,11 +139,10 @@ impl Db {
 
     /// 把已有条目顶到最前（刷新 created_at）
     pub fn touch_item(&self, id: i64, now_ms: i64) -> Result<(), DbError> {
-        self.conn
-            .execute(
-                "UPDATE items SET created_at = ?1 WHERE id = ?2",
-                params![now_ms, id],
-            )?;
+        self.conn.execute(
+            "UPDATE items SET created_at = ?1 WHERE id = ?2",
+            params![now_ms, id],
+        )?;
         Ok(())
     }
 
@@ -140,7 +153,7 @@ impl Db {
                 "SELECT id, kind, content, file_paths, image_path, thumb_path, hash, pinned, created_at, html
                  FROM items WHERE id = ?1",
                 params![id],
-                |row| row_to_item(row),
+                row_to_item,
             )
             .optional()?;
         Ok(item)
@@ -181,7 +194,7 @@ impl Db {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
             rusqlite::params_from_iter(args.iter().map(|a| a.as_ref())),
-            |row| row_to_item(row),
+            row_to_item,
         )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -279,7 +292,9 @@ impl Db {
 
     /// 全部条目数（统计用，避免全量加载）
     pub fn count_all(&self) -> Result<i64, DbError> {
-        Ok(self.conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?)
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?)
     }
 
     // ---------- 设置 ----------
@@ -377,7 +392,13 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         "text" => ItemKind::Text,
         "image" => ItemKind::Image,
         "files" => ItemKind::Files,
-        _ => return Err(rusqlite::Error::InvalidColumnType(1, kind, rusqlite::types::Type::Text)),
+        _ => {
+            return Err(rusqlite::Error::InvalidColumnType(
+                1,
+                kind,
+                rusqlite::types::Type::Text,
+            ))
+        }
     };
     Ok(Item {
         id: row.get(0)?,
@@ -449,8 +470,14 @@ mod tests {
     #[test]
     fn touch_moves_to_top() {
         let db = open_mem();
-        let a = db.insert_item(&test_item("a", false, 100)).unwrap().unwrap();
-        let b = db.insert_item(&test_item("b", false, 200)).unwrap().unwrap();
+        let a = db
+            .insert_item(&test_item("a", false, 100))
+            .unwrap()
+            .unwrap();
+        let b = db
+            .insert_item(&test_item("b", false, 200))
+            .unwrap()
+            .unwrap();
         db.touch_item(a, 300).unwrap();
         let list = db.list_items("", None, 100, 0).unwrap();
         assert_eq!(list[0].id, a);
@@ -473,8 +500,14 @@ mod tests {
     #[test]
     fn pinned_sorted_first() {
         let db = open_mem();
-        let a = db.insert_item(&test_item("a", false, 100)).unwrap().unwrap();
-        let b = db.insert_item(&test_item("b", false, 200)).unwrap().unwrap();
+        let a = db
+            .insert_item(&test_item("a", false, 100))
+            .unwrap()
+            .unwrap();
+        let b = db
+            .insert_item(&test_item("b", false, 200))
+            .unwrap()
+            .unwrap();
         db.set_pinned(b, true).unwrap();
         let list = db.list_items("", None, 100, 0).unwrap();
         assert_eq!(list[0].id, b);
@@ -485,9 +518,18 @@ mod tests {
     fn prune_keeps_pinned_removes_oldest() {
         let db = open_mem();
         let p = db.insert_item(&test_item("p", true, 100)).unwrap().unwrap();
-        let x = db.insert_item(&test_item("x", false, 200)).unwrap().unwrap();
-        let y = db.insert_item(&test_item("y", false, 300)).unwrap().unwrap();
-        let z = db.insert_item(&test_item("z", false, 400)).unwrap().unwrap();
+        let x = db
+            .insert_item(&test_item("x", false, 200))
+            .unwrap()
+            .unwrap();
+        let y = db
+            .insert_item(&test_item("y", false, 300))
+            .unwrap()
+            .unwrap();
+        let z = db
+            .insert_item(&test_item("z", false, 400))
+            .unwrap()
+            .unwrap();
         let removed = db.prune(2).unwrap();
         // 上限 2：保留固定 p + 最新 z；删掉最旧的两个 x、y
         assert_eq!(removed.len(), 2);
@@ -506,5 +548,17 @@ mod tests {
         db.set_setting("max_items", "123").unwrap();
         assert_eq!(db.max_items(), 123);
         assert_eq!(db.get_setting("nope").unwrap(), None);
+    }
+
+    /// 富文本升级路径（monitor 去重命中后 set_html 回填）
+    #[test]
+    fn html_upgrade_flow() {
+        let db = open_mem();
+        let mut item = test_item("h1", false, 1000);
+        item.html = None;
+        let id = db.insert_item(&item).unwrap().unwrap();
+        db.set_html(id, Some("<b>x</b>".into())).unwrap();
+        let got = db.get_item(id).unwrap().unwrap();
+        assert_eq!(got.html.as_deref(), Some("<b>x</b>"));
     }
 }

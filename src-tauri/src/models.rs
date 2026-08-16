@@ -83,10 +83,9 @@ impl Item {
             }
             ItemKind::Image => (String::from("图片"), None, 0),
             ItemKind::Files => {
-                let paths: Vec<String> = serde_json::from_str(
-                    self.file_paths.as_deref().unwrap_or("[]"),
-                )
-                .unwrap_or_default();
+                let paths: Vec<String> =
+                    serde_json::from_str(self.file_paths.as_deref().unwrap_or("[]"))
+                        .unwrap_or_default();
                 let count = paths.len() as u32;
                 let preview = paths
                     .first()
@@ -105,5 +104,51 @@ impl Item {
             pinned: self.pinned,
             created_at: self.created_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_item(content: &str) -> Item {
+        Item {
+            id: 1,
+            kind: ItemKind::Text,
+            content: Some(content.into()),
+            html: None,
+            file_paths: None,
+            image_path: None,
+            thumb_path: None,
+            hash: "h".into(),
+            pinned: false,
+            created_at: 0,
+        }
+    }
+
+    /// 超长文本：preview 截断，full 携带全文
+    #[test]
+    fn long_text_preview_truncated_with_full() {
+        let long = "长".repeat(500);
+        let dto = text_item(&long).to_dto(None);
+        assert_eq!(dto.preview.chars().count(), PREVIEW_MAX_CHARS);
+        assert_eq!(dto.full.as_deref(), Some(long.as_str()));
+    }
+
+    /// 短文本：preview 原文，无 full
+    #[test]
+    fn short_text_no_full() {
+        let dto = text_item("hello").to_dto(None);
+        assert_eq!(dto.preview, "hello");
+        assert!(dto.full.is_none());
+    }
+
+    /// 恰好等于阈值的文本不截断
+    #[test]
+    fn boundary_length_not_truncated() {
+        let text = "x".repeat(PREVIEW_MAX_CHARS);
+        let dto = text_item(&text).to_dto(None);
+        assert_eq!(dto.preview.len(), PREVIEW_MAX_CHARS);
+        assert!(dto.full.is_none());
     }
 }

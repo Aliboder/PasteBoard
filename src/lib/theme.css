@@ -12,7 +12,6 @@
   --accent: #4da3ff;
   --accent-soft: rgba(77, 163, 255, 0.13);
   --danger: #f07178;
-  --star: #ffcf5c;
   --shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
   --radius: 14px;
   font-family: "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
@@ -31,6 +30,5 @@
   --accent: #2f6fd8;
   --accent-soft: rgba(47, 111, 216, 0.11);
   --danger: #d64550;
-  --star: #b8860b;
   --shadow: 0 16px 48px rgba(30, 35, 50, 0.26);
 }
