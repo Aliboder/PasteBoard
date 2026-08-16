@@ -2,9 +2,13 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": ["main", "big-image"],
   "permissions": [
     "core:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-current-monitor",
+    "core:window:allow-scale-factor",
+    "core:window:allow-center",
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:window:allow-set-focus",
@@ -12,6 +16,7 @@
     "core:window:allow-set-size",
     "core:window:allow-inner-size",
     "core:window:allow-set-always-on-top",
+    "core:window:allow-close",
     "global-shortcut:default"
   ]
 }

@@ -17,6 +17,7 @@
     type SettingsDto,
   } from "../lib/api";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+  import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import FileTile from "../lib/FileTile.svelte";
   import TextRow from "../lib/TextRow.svelte";
   import GridPanel from "../lib/GridPanel.svelte";
@@ -29,6 +30,7 @@
     Settings,
     Pin,
     PinOff,
+    Maximize2,
     ExternalLink,
     Folder,
     Image as ImageIcon,
@@ -220,6 +222,61 @@
 
   let listSectionEl: HTMLElement | undefined = $state();
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // ---------- 查看大图（独立窗口） ----------
+  /** 大图窗口是否打开（打开期间抑制主窗口失焦隐藏） */
+  let bigWinOpen = $state(false);
+
+  /** 可预览大图的图片扩展名（与后端 IMAGE_EXTS 一致） */
+  const IMAGE_EXTS = new Set([
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "avif", "tif", "tiff",
+  ]);
+
+  /** 条目是否可查看大图：图片条目，或首个文件为图片的文件条目 */
+  function isImageItem(item: ItemDto): boolean {
+    if (item.kind === "image") return true;
+    if (item.kind !== "files") return false;
+    const ext = item.preview.split(".").pop()?.toLowerCase() ?? "";
+    return IMAGE_EXTS.has(ext);
+  }
+
+  /** 打开独立大图窗口：图片条目读原图，图片文件读文件预览；已存在则关闭后重建（无 navigate API） */
+  async function openBigImage(item: ItemDto) {
+    closeCtxMenu();
+    const url =
+      item.kind === "image"
+        ? `/big-image?kind=image&id=${item.id}`
+        : `/big-image?kind=file&path=${encodeURIComponent(item.preview)}`;
+    const existing = await WebviewWindow.getByLabel("big-image");
+    if (existing) {
+      // 等旧窗口销毁后再以同 label 重建（避免 label 冲突）
+      const destroyed = new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 500);
+        existing.once("tauri://destroyed", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      existing.close();
+      await destroyed;
+    }
+    const win = new WebviewWindow("big-image", {
+      url,
+      title: "查看大图",
+      visible: false,
+      decorations: false,
+      resizable: true,
+      backgroundColor: "#101010",
+    });
+    bigWinOpen = true;
+    win.once("tauri://destroyed", () => {
+      bigWinOpen = false;
+    });
+    win.once("tauri://error", () => {
+      bigWinOpen = false;
+      showError("大图窗口打开失败");
+    });
+  }
 
   /** 主题：dark / light / system（system 跟随系统深色模式，实时响应变化） */
   let mediaDark: MediaQueryList | null = null;
@@ -509,7 +566,7 @@
         // silent：不闪"加载中"，避免滚动位置丢失
         reload(true);
         refreshSettings();
-      } else if (hasFocusSinceShow && !suppressBlurHide) {
+      } else if (hasFocusSinceShow && !suppressBlurHide && !bigWinOpen) {
         if (!blurHideTimer) {
           blurHideTimer = setTimeout(() => {
             blurHideTimer = null;
@@ -791,6 +848,12 @@
       onkeydown={() => {}}
     ></div>
     <div class="ctx-menu" style="left: {ctxMenu.x}px; top: {ctxMenu.y}px">
+      {#if isImageItem(ctxMenu!.item)}
+        <button onclick={() => openBigImage(ctxMenu!.item)}>
+          <Maximize2 size={12} />
+          查看大图
+        </button>
+      {/if}
       <button onclick={() => ctxCopy(ctxMenu!.item)}>
         <ClipboardList size={12} />
         复制
