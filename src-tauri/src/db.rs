@@ -159,7 +159,8 @@ impl Db {
         Ok(item)
     }
 
-    /// 查询历史；keyword 非空时对文本内容/文件路径做 LIKE 过滤；kind 非空时按类型过滤
+    /// 查询历史；keyword 非空时对文本内容/文件路径做 LIKE 过滤；kind 非空时按类型过滤，
+    /// kind == "pinned" 时仅返回固定条目（"置顶" Tab，不限制类型）
     pub fn list_items(
         &self,
         keyword: &str,
@@ -180,7 +181,9 @@ impl Db {
             args.push(Box::new(pattern));
         }
         if let Some(k) = kind {
-            if k == "image" {
+            if k == "pinned" {
+                sql.push_str(" AND pinned = 1");
+            } else if k == "image" {
                 // 图片 Tab 口径：图片条目 + 文件条目（文件中的图片由调用方精确过滤）
                 sql.push_str(" AND (kind = 'image' OR kind = 'files')");
             } else {
@@ -512,6 +515,28 @@ mod tests {
         let list = db.list_items("", None, 100, 0).unwrap();
         assert_eq!(list[0].id, b);
         assert_eq!(list[1].id, a);
+    }
+
+    #[test]
+    fn list_pinned_only() {
+        let db = open_mem();
+        let a = db
+            .insert_item(&test_item("a", false, 100))
+            .unwrap()
+            .unwrap();
+        let b = db.insert_item(&test_item("b", true, 200)).unwrap().unwrap();
+        let mut img = test_item("img", true, 300);
+        img.kind = ItemKind::Image;
+        db.insert_item(&img).unwrap();
+        // 置顶 Tab 口径：仅固定条目，不限制类型
+        let list = db.list_items("", Some("pinned"), 100, 0).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|i| i.pinned));
+        assert!(!list.iter().any(|i| i.id == a));
+        // 固定 + 搜索叠加
+        let list = db.list_items("b", Some("pinned"), 100, 0).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, b);
     }
 
     #[test]

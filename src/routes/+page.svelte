@@ -41,6 +41,7 @@
   /** 类型筛选 Tab 配置 */
   const kindTabs: { k: ItemKind | ""; label: string }[] = [
     { k: "", label: "全部" },
+    { k: "pinned", label: "置顶" },
     { k: "text", label: "文本" },
     { k: "image", label: "图片" },
     { k: "files", label: "文件" },
@@ -582,8 +583,8 @@
       {/each}
     </div>
 
-    {#if kindFilter === ""}
-    <!-- 全部 Tab：上方图片/文件横向条 -->
+    {#if kindFilter === "" || kindFilter === "pinned"}
+    <!-- 全部/置顶 Tab：上方图片/文件横向条 -->
     <section class="strip-section">
       <div class="section-header">
         <span class="section-title">
@@ -593,7 +594,13 @@
         <span class="section-count">{topItems.length} 条</span>
       </div>
       {#if topItems.length === 0}
-        <p class="strip-empty">{filter ? "无匹配结果" : "暂无图片/文件历史"}</p>
+        <p class="strip-empty">
+          {kindFilter === "pinned"
+            ? "暂无固定图片/文件"
+            : filter
+              ? "无匹配结果"
+              : "暂无图片/文件历史"}
+        </p>
       {:else}
         <div class="strip" onwheel={onStripWheel}>
           {#each topItems as item (item.id)}
@@ -682,8 +689,8 @@
     />
     {/if}
 
-    {#if kindFilter === "" || kindFilter === "text"}
-    <!-- 文本历史（全部与文本 Tab 显示） -->
+    {#if kindFilter === "" || kindFilter === "text" || kindFilter === "pinned"}
+    <!-- 文本历史（全部/文本/置顶 Tab 显示） -->
     <section
       class="list-section"
       class:no-top={kindFilter !== ""}
@@ -701,7 +708,11 @@
           <p class="empty">加载中…</p>
         {:else if textItems.length === 0}
           <p class="empty">
-            {filter ? "没有匹配的文本" : "暂无文本历史\n复制文字试试"}
+            {kindFilter === "pinned"
+              ? "暂无固定内容\n悬停条目点击图钉即可固定"
+              : filter
+                ? "没有匹配的文本"
+                : "暂无文本历史\n复制文字试试"}
           </p>
         {:else}
           {#if USE_VIRTUAL}

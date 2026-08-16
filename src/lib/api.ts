@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type ItemKind = "text" | "image" | "files";
+export type ItemKind = "text" | "image" | "files" | "pinned";
 
 export interface ItemDto {
   id: number;
