@@ -33,10 +33,7 @@
 </script>
 
 <div
-  class="row {item.kind}"
-  class:selected
-  class:flow
-  class:pinned={item.pinned}
+  class="row {item.kind}{selected ? ' selected' : ''}{flow ? ' flow' : ''}{item.pinned ? ' pinned' : ''}"
   style={top !== null ? `top: ${top}px` : undefined}
   role="option"
   aria-selected={selected}

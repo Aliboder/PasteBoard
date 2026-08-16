@@ -82,6 +82,19 @@ impl Db {
             }
             self.set_setting("schema_version", "1")?;
         }
+        if version < 2 {
+            // v2：固定条目手动排序（固定 Tab 拖拽，0.7.0 引入）；NULL = 未排过序（按时间倒序排在其他固定条目之后）
+            let cols = self
+                .conn
+                .prepare("PRAGMA table_info(items)")?
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            if !cols.iter().any(|c| c == "pin_order") {
+                self.conn
+                    .execute_batch("ALTER TABLE items ADD COLUMN pin_order INTEGER")?;
+            }
+            self.set_setting("schema_version", "2")?;
+        }
         Ok(())
     }
 
@@ -160,7 +173,7 @@ impl Db {
     }
 
     /// 查询历史；keyword 非空时对文本内容/文件路径做 LIKE 过滤；kind 非空时按类型过滤，
-    /// kind == "pinned" 时仅返回固定条目（"置顶" Tab，不限制类型）
+    /// kind == "pinned" 时仅返回固定条目（"固定" Tab，不限制类型）
     pub fn list_items(
         &self,
         keyword: &str,
@@ -191,7 +204,8 @@ impl Db {
                 args.push(Box::new(k.to_string()));
             }
         }
-        sql.push_str(" ORDER BY pinned DESC, created_at DESC LIMIT ? OFFSET ?");
+        // 排序：一律时间倒序（固定条目不置顶、无手动排序，与普通条目混排）
+        sql.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
         args.push(Box::new(limit));
         args.push(Box::new(offset));
         let mut stmt = self.conn.prepare(&sql)?;
@@ -501,20 +515,21 @@ mod tests {
     }
 
     #[test]
-    fn pinned_sorted_first() {
+    fn pinned_not_priority_in_normal_list() {
         let db = open_mem();
         let a = db
             .insert_item(&test_item("a", false, 100))
             .unwrap()
             .unwrap();
-        let b = db
-            .insert_item(&test_item("b", false, 200))
-            .unwrap()
-            .unwrap();
-        db.set_pinned(b, true).unwrap();
+        let b = db.insert_item(&test_item("b", true, 200)).unwrap().unwrap();
+        // 普通查询（全部/文本/图片/文件）：固定条目不固定，按时间倒序混排
         let list = db.list_items("", None, 100, 0).unwrap();
         assert_eq!(list[0].id, b);
         assert_eq!(list[1].id, a);
+        // 固定查询：仅固定条目
+        let list = db.list_items("", Some("pinned"), 100, 0).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, b);
     }
 
     #[test]
@@ -528,7 +543,7 @@ mod tests {
         let mut img = test_item("img", true, 300);
         img.kind = ItemKind::Image;
         db.insert_item(&img).unwrap();
-        // 置顶 Tab 口径：仅固定条目，不限制类型
+        // 固定 Tab 口径：仅固定条目，不限制类型
         let list = db.list_items("", Some("pinned"), 100, 0).unwrap();
         assert_eq!(list.len(), 2);
         assert!(list.iter().all(|i| i.pinned));
@@ -562,8 +577,9 @@ mod tests {
         assert!(ids.contains(&x) && ids.contains(&y));
         let remaining = db.list_items("", None, 100, 0).unwrap();
         assert_eq!(remaining.len(), 2);
-        assert_eq!(remaining[0].id, p);
-        assert_eq!(remaining[1].id, z);
+        // 普通查询按时间倒序：z(400) 在 p(100) 前
+        assert_eq!(remaining[0].id, z);
+        assert_eq!(remaining[1].id, p);
     }
 
     #[test]

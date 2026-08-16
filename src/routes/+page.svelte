@@ -41,7 +41,7 @@
   /** 类型筛选 Tab 配置 */
   const kindTabs: { k: ItemKind | ""; label: string }[] = [
     { k: "", label: "全部" },
-    { k: "pinned", label: "置顶" },
+    { k: "pinned", label: "固定" },
     { k: "text", label: "文本" },
     { k: "image", label: "图片" },
     { k: "files", label: "文件" },
@@ -301,8 +301,12 @@
     }
   }
 
-  async function reload() {
-    loading = true;
+  /**
+   * 刷新列表；silent 时不清空列表（保留旧内容渲染，数据到位就地替换），
+   * 用于操作后刷新——避免"加载中"占位导致滚动位置丢失（全部页点固定按钮滚动条回顶问题）
+   */
+  async function reload(silent = false) {
+    if (!silent) loading = true;
     try {
       items = await getHistory(filter, kindFilter, 500, 0);
     } catch (e) {
@@ -330,7 +334,7 @@
 
   async function togglePin(item: ItemDto) {
     const ok = await pinItem(item.id, !item.pinned);
-    if (ok) await reload();
+    if (ok) await reload(true);
   }
 
   /** 删除：固定条目需二次确认（3 秒内再点一次），非固定一键删除 */
@@ -344,7 +348,7 @@
     if (confirmTimer) clearTimeout(confirmTimer);
     confirmDeleteId = null;
     await deleteItem(item.id);
-    await reload();
+    await reload(true);
   }
 
   async function paste(id: number) {
@@ -502,7 +506,8 @@
       if (payload) {
         hasFocusSinceShow = true;
         cancelBlurHide();
-        reload();
+        // silent：不闪"加载中"，避免滚动位置丢失
+        reload(true);
         refreshSettings();
       } else if (hasFocusSinceShow && !suppressBlurHide) {
         if (!blurHideTimer) {
@@ -517,7 +522,7 @@
     getCurrentWindow().onResized(() => cancelBlurHide());
     getCurrentWindow().onMoved(() => cancelBlurHide());
     let cleanup: (() => void) | null = null;
-    onChange(() => reload()).then((un) => (cleanup = un));
+    onChange(() => reload(true)).then((un) => (cleanup = un));
     return () => {
       cleanup?.();
     };
@@ -538,7 +543,7 @@
       <input
         placeholder="搜索剪贴板历史…"
         bind:value={filter}
-        oninput={reload}
+        oninput={() => reload()}
         spellcheck="false"
       />
       {#if filter}
@@ -584,7 +589,7 @@
     </div>
 
     {#if kindFilter === "" || kindFilter === "pinned"}
-    <!-- 全部/置顶 Tab：上方图片/文件横向条 -->
+    <!-- 全部/固定 Tab：上方图片/文件横向条 -->
     <section class="strip-section">
       <div class="section-header">
         <span class="section-title">
@@ -605,8 +610,7 @@
         <div class="strip" onwheel={onStripWheel}>
           {#each topItems as item (item.id)}
             <div
-              class="strip-item {item.kind}"
-              class:pinned={item.pinned}
+              class="strip-item {item.kind}{item.pinned ? ' pinned' : ''}"
               role="option"
               aria-selected={false}
               aria-label={item.preview}
@@ -690,7 +694,7 @@
     {/if}
 
     {#if kindFilter === "" || kindFilter === "text" || kindFilter === "pinned"}
-    <!-- 文本历史（全部/文本/置顶 Tab 显示） -->
+    <!-- 文本历史（全部/文本/固定 Tab 显示） -->
     <section
       class="list-section"
       class:no-top={kindFilter !== ""}
@@ -714,6 +718,18 @@
                 ? "没有匹配的文本"
                 : "暂无文本历史\n复制文字试试"}
           </p>
+          {#if kindFilter === "pinned"}
+            <button
+              class="empty-btn"
+              onclick={() => {
+                filter = "";
+                kindFilter = "";
+                reload();
+              }}
+            >
+              去全部页固定
+            </button>
+          {/if}
         {:else}
           {#if USE_VIRTUAL}
             <div class="list-inner virtual" style="height: {totalHeight}px">
@@ -1167,9 +1183,24 @@
     text-align: center;
     color: var(--text-dim);
     font-size: 13px;
-    padding: 48px 0;
+    padding: 48px 0 12px;
     white-space: pre-line;
     line-height: 1.8;
+  }
+  .empty-btn {
+    display: block;
+    margin: 4px auto 0;
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    font-size: 12px;
+    padding: 6px 18px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+  .empty-btn:hover {
+    background: var(--accent-soft);
   }
   .error-msg {
     color: var(--danger);

@@ -179,7 +179,7 @@ pub struct SettingsDto {
     pub follow_mouse: String,
     /// "on" / "off"：粘贴后是否保持窗口打开
     pub keep_open: String,
-    /// "on" / "off"：窗口置顶
+    /// "on" / "off"：窗口固定
     pub always_on_top: String,
     /// 窗口尺寸（逻辑像素，0 表示未保存）
     pub win_w: f64,
@@ -266,7 +266,7 @@ pub fn set_toggle(
             message: "值必须为 on/off".into(),
         });
     }
-    // 置顶即时生效
+    // 固定即时生效
     if key == "always_on_top" {
         if let Some(win) = app.get_webview_window("main") {
             let _ = win.set_always_on_top(value == "on");
