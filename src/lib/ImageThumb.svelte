@@ -45,7 +45,7 @@
 
 <div bind:this={rootEl} class="thumb-wrap">
   {#if src}
-    <img src={src} alt={alt} draggable="false" />
+    <img src="data:image/png;base64,{src}" alt={alt} draggable="false" />
   {:else}
     <span class="thumb-placeholder">
       <ImageIcon size={16} />
