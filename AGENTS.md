@@ -19,7 +19,7 @@
 ### 核心功能
 
 - 剪贴板历史：**文本 / 图片 / 文件**三类，事件驱动监听（`AddClipboardFormatListener`）+ 轮询兜底
-- 上下分区布局：上方图片/文件横向条（滚轮横滚），下方文本列表（自适应行数，悬停全文预览）
+- 上下分区布局：上方图片/文件横向条（滚轮横滚），下方文本列表（自适应行数）
 - 文件图标：Shell API 系统图标（`SHGetFileInfo`），图片文件直接显示缩略图
 - 粘贴回原窗口：焦点控件 + 选中范围（`EM_GETSEL/SETSEL`）精确恢复
 - 点击窗口外部自动隐藏（失焦延迟 250ms + 缩放/移动事件识别）
@@ -120,7 +120,8 @@ npm run tauri build  # 打包（NSIS + MSI + 便携 exe）
 
 ### 前端组件结构（已拆解，勿再堆回 +page.svelte）
 
-- `src/routes/+page.svelte`：主窗口编排（状态/键盘导航/预览浮层/右键菜单）
+- `src/routes/+page.svelte`：主窗口编排（状态/键盘导航/右键菜单/大图窗口）
+- `src/routes/big-image/+page.svelte`：查看大图独立窗口（尺寸自适应）
 - `src/lib/TextRow.svelte`：文本行（虚拟/全量两种模式由父组件切换）
 - `src/lib/GridPanel.svelte`：图片/文件网格
 - `src/lib/SettingsPanel.svelte`：设置面板（含热键录制/清空菜单，自包含状态）
