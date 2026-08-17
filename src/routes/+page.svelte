@@ -23,6 +23,7 @@
   import GridPanel from "../lib/GridPanel.svelte";
   import SettingsPanel from "../lib/SettingsPanel.svelte";
   import ImageThumb from "../lib/ImageThumb.svelte";
+  import DebugOverlay from "../lib/DebugOverlay.svelte";
   import { splitHighlight, timeLabel } from "../lib/utils";
   import {
     Search,
@@ -222,6 +223,8 @@
 
   let listSectionEl: HTMLElement | undefined = $state();
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 调试模式开关（不持久化，重启后自动关闭） */
+  let debugMode = $state(false);
 
   // ---------- 查看大图（独立窗口） ----------
   /** 大图窗口是否打开（打开期间抑制主窗口失焦隐藏） */
@@ -592,9 +595,9 @@
 
 <svelte:window onkeydown={globalKeydown} />
 
-<div class="window">
+<div class="window" data-debug-id="app-root">
   <!-- 顶栏：拖动区域（deep = 子树内非交互元素均可拖动）+ 搜索 + 清空 -->
-  <header class="topbar" data-tauri-drag-region="deep">
+  <header class="topbar" data-tauri-drag-region="deep" data-debug-id="topbar">
     <div class="searchbox">
       <Search size={14} class="search-icon" />
       <input
@@ -621,15 +624,17 @@
   {#if showSettings}
     <SettingsPanel
       {settings}
+      {debugMode}
       onApplyTheme={applyTheme}
       onCleared={onSettingsChanged}
+      onToggleDebug={(on) => (debugMode = on)}
     />
   {/if}
 
   <!-- 内容区：类型 Tab + 按类型切换布局 -->
   <div class="content">
     <!-- 类型筛选：全部 / 文本 / 图片 / 文件（与搜索叠加） -->
-    <div class="kind-tabs">
+    <div class="kind-tabs" data-debug-id="kind-tabs">
       {#each kindTabs as tab (tab.k)}
         <button
           class="kind-tab {kindFilter === tab.k ? 'active' : ''}"
@@ -647,7 +652,7 @@
 
     {#if kindFilter === "" || kindFilter === "pinned"}
     <!-- 全部/固定 Tab：上方图片/文件横向条 -->
-    <section class="strip-section">
+    <section class="strip-section" data-debug-id="strip-section">
       <div class="section-header">
         <span class="section-title">
           <ImageIcon size={12} />
@@ -756,6 +761,7 @@
       class="list-section"
       class:no-top={kindFilter !== ""}
       bind:this={listSectionEl}
+      data-debug-id="list-section"
     >
       <div class="section-header">
         <span class="section-title">
@@ -884,13 +890,15 @@
   {/if}
 
   <!-- 底部提示（也可拖动窗口） -->
-  <footer class="footer" data-tauri-drag-region="deep">
+  <footer class="footer" data-tauri-drag-region="deep" data-debug-id="footer">
     <span>↑↓ 选择</span>
     <span>Enter 粘贴</span>
     <span>Esc 关闭</span>
     <span class="dot">•</span>
     <span>文本 {textItems.length} · 媒体 {topItems.length}</span>
   </footer>
+
+  <DebugOverlay enabled={debugMode} />
 </div>
 
 <style>

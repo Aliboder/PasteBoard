@@ -24,12 +24,16 @@
 
   let {
     settings,
+    debugMode = false,
     onApplyTheme,
     onCleared,
+    onToggleDebug,
   }: {
     settings: SettingsDto | null;
+    debugMode?: boolean;
     onApplyTheme: (theme: string) => void;
     onCleared: () => void;
+    onToggleDebug?: (on: boolean) => void;
   } = $props();
 
   let maxItemsInput = $state("500");
@@ -262,6 +266,15 @@
         type="checkbox"
         checked={settings?.autostart ?? false}
         onchange={(e) => toggleAutostart((e.currentTarget as HTMLInputElement).checked)}
+      />
+      <span class="switch"></span>
+    </label>
+    <label class="switch-row">
+      <span>调试模式<span class="debug-hint">（重启后自动关闭）</span></span>
+      <input
+        type="checkbox"
+        checked={debugMode}
+        onchange={(e) => onToggleDebug?.((e.currentTarget as HTMLInputElement).checked)}
       />
       <span class="switch"></span>
     </label>
@@ -560,6 +573,11 @@
   }
   .switch-row input:checked + .switch::after {
     transform: translateX(14px);
+  }
+  .debug-hint {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-left: 4px;
   }
 
   /* 清空历史二级菜单 */
