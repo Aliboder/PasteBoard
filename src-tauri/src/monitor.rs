@@ -168,19 +168,17 @@ fn process_clipboard_change() {
 
 /// 读取剪贴板并入库；返回 (条目, 是否新增)。重复内容仅刷新时间（changed=false）
 fn save_from_clipboard(state: &AppState, app: &AppHandle) -> Result<Option<(Item, bool)>, DbError> {
-    // 1. 类型判定：文件 > 图片 > 文本（文本附带富文本 HTML）
+    // 0. 文件列表：每个文件单独入库（不再合并成一条），整批处理完后统一通知前端
+    if let Some(files) = clipboard::read_files() {
+        if !files.is_empty() {
+            save_files_batch(state, app, &files)?;
+        }
+        return Ok(None);
+    }
+
+    // 1. 类型判定：图片 > 文本（文本附带富文本 HTML）
     let (kind, content, html, file_paths, image_data, hash) =
-        if let Some(files) = clipboard::read_files() {
-            let json = serde_json::to_string(&files).unwrap_or_else(|_| "[]".into());
-            (
-                ItemKind::Files,
-                None,
-                None,
-                Some(json),
-                None,
-                dedup::hash_files(&files),
-            )
-        } else if let Some((rgba, w, h)) = clipboard::read_image_rgba() {
+        if let Some((rgba, w, h)) = clipboard::read_image_rgba() {
             let Some(hash) = dedup::hash_image_rgba(&rgba, w, h) else {
                 return Ok(None);
             };
@@ -273,6 +271,53 @@ fn save_from_clipboard(state: &AppState, app: &AppHandle) -> Result<Option<(Item
     }
 
     Ok(Some((item, true)))
+}
+
+/// 文件列表逐文件入库：每条记录一个文件（图片 Tab 依赖"首文件为图片"逻辑自动归类）；
+/// 批次内按用户复制顺序显示（created_at 依次递减 1ms 保序）；去重命中仅刷新时间
+fn save_files_batch(state: &AppState, app: &AppHandle, files: &[String]) -> Result<(), DbError> {
+    let db = state.db.lock().unwrap();
+    let now = now_ms();
+    for (i, path) in files.iter().enumerate() {
+        let ts = now - (files.len() as i64 - 1 - i as i64);
+        let hash = dedup::hash_files(std::slice::from_ref(path));
+        if let Some(existing_id) = db.find_by_hash(&hash)? {
+            db.touch_item(existing_id, ts)?;
+            log::debug!("dedup: touch file item {existing_id}");
+            continue;
+        }
+        let file_paths =
+            serde_json::to_string(std::slice::from_ref(path)).unwrap_or_else(|_| "[]".into());
+        let item = Item {
+            id: 0,
+            kind: ItemKind::Files,
+            content: None,
+            html: None,
+            file_paths: Some(file_paths),
+            image_path: None,
+            thumb_path: None,
+            hash,
+            pinned: false,
+            created_at: ts,
+        };
+        let Some(id) = db.insert_item(&item)? else {
+            continue;
+        };
+        log::info!("saved clipboard file item id={id} path={path}");
+    }
+
+    // 上限清理
+    let removed = db.prune(db.max_items())?;
+    if !removed.is_empty() {
+        let ids: Vec<i64> = removed.iter().map(|r| r.id).collect();
+        let _ = app.emit("clipboard://pruned", serde_json::json!(ids));
+        for r in removed {
+            state.store.remove_files(&r);
+        }
+    }
+    // 通知前端刷新（批量入库，payload 被忽略）
+    let _ = app.emit("clipboard://changed", serde_json::json!({}));
+    Ok(())
 }
 
 /// 组装前端视图；图片缩略图读取后转 base64

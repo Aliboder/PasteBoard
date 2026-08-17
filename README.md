@@ -65,4 +65,4 @@ Rust + Tauri v2 + Svelte(TS) + SQLite(rusqlite) + Windows API（`AddClipboardFor
 
 ## 版本
 
-v0.8.0 · 2026/08/17（查看大图：右键图片弹出独立无边框窗口，尺寸按图片等比自适应、贴合无黑边）
+v0.8.1 · 2026/08/17（复制多个文件时逐文件单独记录，不再合并成一条，图片自动归类到图片 Tab）
