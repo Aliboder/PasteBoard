@@ -65,4 +65,4 @@ Rust + Tauri v2 + Svelte(TS) + SQLite(rusqlite) + Windows API（`AddClipboardFor
 
 ## 版本
 
-v0.8.1 · 2026/08/17（复制多个文件时逐文件单独记录，不再合并成一条，图片自动归类到图片 Tab）
+v0.8.2 · 2026/08/17（取消固定时条目刷新时间戳，作为最新记录回到列表顶部）

@@ -217,10 +217,16 @@ impl Db {
     }
 
     pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<bool, DbError> {
-        let n = self.conn.execute(
-            "UPDATE items SET pinned = ?1 WHERE id = ?2",
-            params![pinned as i64, id],
-        )?;
+        // 取消固定时刷新时间戳：条目作为最新记录重新回到列表顶部（固定期间豁免清理）
+        let n = if pinned {
+            self.conn
+                .execute("UPDATE items SET pinned = 1 WHERE id = ?1", params![id])?
+        } else {
+            self.conn.execute(
+                "UPDATE items SET pinned = 0, created_at = ?1 WHERE id = ?2",
+                params![now_ms(), id],
+            )?
+        };
         Ok(n > 0)
     }
 
@@ -552,6 +558,27 @@ mod tests {
         let list = db.list_items("b", Some("pinned"), 100, 0).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, b);
+    }
+
+    #[test]
+    fn unpin_refreshes_timestamp_to_top() {
+        let db = open_mem();
+        let a = db
+            .insert_item(&test_item("a", false, 100))
+            .unwrap()
+            .unwrap();
+        let b = db.insert_item(&test_item("b", true, 200)).unwrap().unwrap();
+        db.set_pinned(b, false).unwrap();
+        // 取消固定后时间戳刷新为最新，作为新记录回到列表顶部（先于所有旧条目）
+        let list = db.list_items("", None, 100, 0).unwrap();
+        assert_eq!(list[0].id, b);
+        assert!(!list[0].pinned);
+        assert!(list[0].created_at >= list[1].created_at);
+        // 固定动作不刷新时间戳
+        let before = list[0].created_at;
+        db.set_pinned(b, true).unwrap();
+        let item = db.get_item(b).unwrap().unwrap();
+        assert_eq!(item.created_at, before);
     }
 
     #[test]
